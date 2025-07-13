@@ -24,12 +24,26 @@ type BackupJob struct {
 	Source      string    `json:"source"`
 	Destination string    `json:"destination"`
 	Type        string    `json:"type"`     // postgres, mysql, mongodb, file, directory
-	Schedule    string    `json:"schedule"` // 1h, 24h, 7d, etc.
-	Status      string    `json:"status"`   // active, paused, running, error
+	Schedule    string    `json:"schedule"` // 1h, 24h, 7d, oneoff, etc.
+	Status      string    `json:"status"`   // active, paused, running, error, completed
 	LastRun     time.Time `json:"last_run"`
 	NextRun     time.Time `json:"next_run"`
 	LastResult  string    `json:"last_result"`
 	CreatedAt   time.Time `json:"created_at"`
+}
+
+type BackupMetadata struct {
+	JobID       int       `json:"job_id"`
+	JobName     string    `json:"job_name"`
+	BackupType  string    `json:"backup_type"`
+	Source      string    `json:"source"`
+	BackupFile  string    `json:"backup_file"`
+	Timestamp   time.Time `json:"timestamp"`
+	FileSize    int64     `json:"file_size_bytes"`
+	FileSizeStr string    `json:"file_size_human"`
+	Duration    string    `json:"duration"`
+	Status      string    `json:"status"`
+	Error       string    `json:"error,omitempty"`
 }
 
 type BackupConfig struct {
@@ -92,9 +106,7 @@ func loadEnvironmentFile() {
 			continue
 		}
 
-		if strings.HasPrefix(line, "export ") {
-			line = strings.TrimPrefix(line, "export ")
-		}
+		line = strings.TrimPrefix(line, "export ")
 
 		parts := strings.SplitN(line, "=", 2)
 		if len(parts) == 2 {
@@ -206,13 +218,17 @@ func main() {
 	s := table.DefaultStyles()
 	s.Header = s.Header.
 		BorderStyle(lipgloss.NormalBorder()).
-		BorderForeground(lipgloss.Color("240")).
+		BorderForeground(lipgloss.Color("#374151")).
 		BorderBottom(true).
-		Bold(false)
+		Bold(true).
+		Foreground(lipgloss.Color("#F3F4F6")).
+		Background(lipgloss.Color("#1F2937"))
 	s.Selected = s.Selected.
-		Foreground(lipgloss.Color("229")).
-		Background(lipgloss.Color("57")).
-		Bold(false)
+		Foreground(lipgloss.Color("#F3F4F6")).
+		Background(lipgloss.Color("#7C3AED")).
+		Bold(true)
+	s.Cell = s.Cell.
+		Foreground(lipgloss.Color("#E5E7EB"))
 	t.SetStyles(s)
 
 	m.table = t
@@ -361,7 +377,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for i, job := range m.jobs {
 			if job.ID == msg.jobID {
 				m.jobs[i].LastRun = time.Now()
-				m.jobs[i].Status = "active"
+
+				// Handle OneOff jobs - mark as completed
+				if strings.ToLower(job.Schedule) == "oneoff" {
+					m.jobs[i].Status = "completed"
+				} else {
+					m.jobs[i].Status = "active"
+				}
+
 				if msg.success {
 					m.jobs[i].LastResult = "Success"
 				} else {
@@ -462,7 +485,7 @@ func (m model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			Source:      "/path/to/source",
 			Destination: "./backups/",
 			Type:        "file",
-			Schedule:    "24h",
+			Schedule:    "oneoff",
 			Status:      "active",
 			LastResult:  "Not run",
 			CreatedAt:   time.Now(),
@@ -506,11 +529,21 @@ func (m model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "p":
 		if len(m.jobs) > 0 {
 			idx := m.table.Cursor()
-			if m.jobs[idx].Status == "active" {
+			currentStatus := m.jobs[idx].Status
+
+			// Don't allow pausing/resuming completed oneoff jobs
+			if currentStatus == "completed" && strings.ToLower(m.jobs[idx].Schedule) == "oneoff" {
+				return m, showStatus("❌ Cannot resume completed OneOff job")
+			}
+
+			if currentStatus == "active" {
 				m.jobs[idx].Status = "paused"
-			} else if m.jobs[idx].Status == "paused" {
+			} else if currentStatus == "paused" {
+				m.jobs[idx].Status = "active"
+			} else if currentStatus == "completed" {
 				m.jobs[idx].Status = "active"
 			}
+
 			m.config.Jobs = m.jobs
 			saveConfig(m.config, m.configFile)
 			m.updateTable()
@@ -532,14 +565,15 @@ func (m model) runBackup(jobID int) tea.Cmd {
 			if job.ID == jobID {
 				m.jobs[i].Status = "running"
 
-				timestamp := time.Now().Format("20060102_150405")
+				startTime := time.Now()
+				timestamp := startTime.Format("2006-01-02_15-04-05")
 				var err error
 
 				switch job.Type {
 				case "postgres":
-					err = backupPostgres(job.Source, job.Destination, timestamp)
+					_, err = backupPostgresWithMetadata(job, timestamp, startTime)
 				case "mysql":
-					err = backupMySQL(job.Source, job.Destination, timestamp)
+					_, err = backupMySQLWithMetadata(job, timestamp, startTime)
 				case "mongodb":
 					connectionString := job.Source
 					if strings.HasPrefix(connectionString, "$") {
@@ -550,11 +584,11 @@ func (m model) runBackup(jobID int) tea.Cmd {
 							break
 						}
 					}
-					err = backupMongoDB(connectionString, job.Destination, timestamp)
+					_, err = backupMongoDBWithMetadata(job, connectionString, timestamp, startTime)
 				case "file":
-					err = backupFile(job.Source, job.Destination, timestamp)
+					_, err = backupFileWithMetadata(job, timestamp, startTime)
 				case "directory":
-					err = backupDirectory(job.Source, job.Destination, timestamp)
+					_, err = backupDirectoryWithMetadata(job, timestamp, startTime)
 				default:
 					err = fmt.Errorf("unknown backup type: %s", job.Type)
 				}
@@ -567,10 +601,15 @@ func (m model) runBackup(jobID int) tea.Cmd {
 					}
 				}
 
+				successMsg := fmt.Sprintf("✅ Backup completed: %s", job.Name)
+				if strings.ToLower(job.Schedule) == "oneoff" {
+					successMsg += " (OneOff job marked as completed)"
+				}
+
 				return backupCompleteMsg{
 					jobID:   jobID,
 					success: true,
-					message: fmt.Sprintf("✅ Backup completed: %s", job.Name),
+					message: successMsg,
 				}
 			}
 		}
@@ -632,12 +671,21 @@ func findBackupsForJob(job BackupJob) ([]string, error) {
 
 	switch job.Type {
 	case "postgres", "mysql":
-		pattern := filepath.Join(job.Destination, "*.sql")
-		files, err := filepath.Glob(pattern)
+		// Look for backup directories with pattern {source}_{timestamp}
+		entries, err := os.ReadDir(job.Destination)
 		if err != nil {
 			return nil, err
 		}
-		backupFiles = files
+
+		for _, entry := range entries {
+			if entry.IsDir() && strings.HasPrefix(entry.Name(), job.Source+"_") {
+				// Check if the SQL file exists inside the directory
+				sqlFile := filepath.Join(job.Destination, entry.Name(), job.Source+".sql")
+				if _, err := os.Stat(sqlFile); err == nil {
+					backupFiles = append(backupFiles, sqlFile)
+				}
+			}
+		}
 
 	case "mongodb":
 		entries, err := os.ReadDir(job.Destination)
@@ -652,6 +700,7 @@ func findBackupsForJob(job BackupJob) ([]string, error) {
 		}
 
 	case "file":
+		// Look for backup directories with pattern {basename}_{timestamp}
 		entries, err := os.ReadDir(job.Destination)
 		if err != nil {
 			return nil, err
@@ -659,59 +708,213 @@ func findBackupsForJob(job BackupJob) ([]string, error) {
 
 		baseName := filepath.Base(job.Source)
 		for _, entry := range entries {
-			if !entry.IsDir() && strings.HasPrefix(entry.Name(), baseName+"_") {
-				backupFiles = append(backupFiles, filepath.Join(job.Destination, entry.Name()))
+			if entry.IsDir() && strings.HasPrefix(entry.Name(), baseName+"_") {
+				// Check if the file exists inside the directory
+				backupFile := filepath.Join(job.Destination, entry.Name(), baseName)
+				if _, err := os.Stat(backupFile); err == nil {
+					backupFiles = append(backupFiles, backupFile)
+				}
 			}
 		}
 
 	case "directory":
-		pattern := filepath.Join(job.Destination, "*.tar.gz")
-		files, err := filepath.Glob(pattern)
+		// Look for backup directories with pattern {basename}_{timestamp}
+		entries, err := os.ReadDir(job.Destination)
 		if err != nil {
 			return nil, err
 		}
-		backupFiles = files
+
+		baseName := filepath.Base(job.Source)
+		for _, entry := range entries {
+			if entry.IsDir() && strings.HasPrefix(entry.Name(), baseName+"_") {
+				// Check if the tar.gz file exists inside the directory
+				tarFile := filepath.Join(job.Destination, entry.Name(), baseName+".tar.gz")
+				if _, err := os.Stat(tarFile); err == nil {
+					backupFiles = append(backupFiles, tarFile)
+				}
+			}
+		}
 	}
 
 	return backupFiles, nil
 }
 
 func (m model) View() string {
-	header := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("86")).
-		Render("💾 Backup Manager - Job Scheduler")
+	// Define styles
+	titleStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("#F3F4F6")).
+		Background(lipgloss.Color("#7C3AED")).
+		Padding(0, 2).
+		MarginBottom(1).
+		BorderStyle(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("#A855F7"))
+
+	errorStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#EF4444")).
+		Bold(true)
+
+	successStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#10B981")).
+		Bold(true)
+
+	helpStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#6B7280")).
+		MarginTop(1)
+
+	// Header with app info
+	header := titleStyle.Render("� Backup Manager v1.0")
+	subtitle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#9CA3AF")).
+		Render("Database & File Backup Scheduler")
 
 	if len(m.jobs) == 0 {
-		content := "\nNo backup jobs configured yet.\n\nPress 'n' to add your first backup job!"
-		footer := "n: add new job • q: quit"
-		return fmt.Sprintf("%s\n%s\n\n%s", header, content, footer)
+		emptyStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#6B7280")).
+			MarginTop(2).
+			MarginBottom(2)
+
+		content := emptyStyle.Render("📋 No backup jobs configured yet.\n\n💡 Press 'n' to add your first backup job!")
+		footer := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#60A5FA")).
+			Render("Commands: ") +
+			lipgloss.NewStyle().Foreground(lipgloss.Color("#FBBF24")).Render("n/a: add job") +
+			lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render(" • ") +
+			lipgloss.NewStyle().Foreground(lipgloss.Color("#F87171")).Render("q: quit")
+
+		return lipgloss.JoinVertical(lipgloss.Left,
+			header,
+			subtitle,
+			content,
+			footer,
+		)
 	}
 
+	// Status message with proper styling
 	var statusMessage string
 	if m.statusMsg != "" && time.Now().Before(m.statusExpiry) {
-		color := lipgloss.Color("86")
 		if strings.Contains(m.statusMsg, "❌") || strings.Contains(m.statusMsg, "Failed") {
-			color = lipgloss.Color("196")
+			statusMessage = errorStyle.Render("Status: " + m.statusMsg)
+		} else {
+			statusMessage = successStyle.Render("Status: " + m.statusMsg)
 		}
-		statusStyle := lipgloss.NewStyle().Foreground(color)
-		statusMessage = " > " + statusStyle.Render(m.statusMsg)
 	}
 
+	// Footer with commands
 	var footer string
 	if m.editMode {
 		colNames := []string{"", "Name", "Type", "Source", "Schedule"}
 		colName := colNames[m.editCol]
-		footer = fmt.Sprintf("Editing %s: %s | tab: next field • enter: save • esc: cancel", colName, m.textInput.View())
+		editStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#F59E0B")).
+			Bold(true)
+
+		scheduleHelp := ""
+		if colName == "Schedule" {
+			scheduleHelp = " (e.g. 1h, 24h, 7d, oneoff)"
+		}
+
+		footer = editStyle.Render(fmt.Sprintf("✏️  Editing %s%s: %s", colName, scheduleHelp, m.textInput.View())) +
+			helpStyle.Render("\nCommands: tab: next field • enter: save • esc: cancel")
 	} else {
-		footer = fmt.Sprintf("↑↓: navigate • space/enter: backup • ctrl+r: restore • e: edit • n/a: add • p: pause/resume • d/delete: delete • r: refresh • q: quit\n%s", statusMessage)
+		// Style individual command groups with colors
+		navStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#60A5FA"))    // Blue
+		actionStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#34D399")) // Green
+		editStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FBBF24"))   // Yellow
+		systemStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#F87171")) // Red
+
+		commandsHelp := []string{
+			navStyle.Render("↑↓: navigate"),
+			actionStyle.Render("space/enter: backup"),
+			actionStyle.Render("ctrl+r: restore"),
+			editStyle.Render("e: edit"),
+			editStyle.Render("n/a: add"),
+			editStyle.Render("p: pause/resume"),
+			systemStyle.Render("d: delete"),
+			systemStyle.Render("r: refresh"),
+			systemStyle.Render("q: quit"),
+		}
+		footer = helpStyle.Render("Commands: " + strings.Join(commandsHelp, " • "))
+
+		if statusMessage != "" {
+			footer = statusMessage + "\n" + footer
+		}
 	}
 
-	tableView := m.table.View()
-	return fmt.Sprintf("%s\n\n%s\n\n%s", header, tableView, footer)
+	// Job count info
+	activeJobs := 0
+	completedJobs := 0
+	pausedJobs := 0
+	for _, job := range m.jobs {
+		switch job.Status {
+		case "completed":
+			completedJobs++
+		case "active":
+			activeJobs++
+		case "paused":
+			pausedJobs++
+		}
+	}
+
+	statsStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#9CA3AF")).
+		Background(lipgloss.Color("#111827")).
+		Padding(0, 1).
+		BorderStyle(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("#374151"))
+	stats := statsStyle.Render(fmt.Sprintf("📊 Jobs: %d total | %d active | %d paused | %d completed",
+		len(m.jobs), activeJobs, pausedJobs, completedJobs))
+
+	return lipgloss.JoinVertical(lipgloss.Left,
+		header,
+		subtitle,
+		"",
+		stats,
+		"",
+		m.table.View(),
+		"",
+		footer,
+	)
 }
 
-// Backup functions
+// Backup functions with metadata
+func backupPostgresWithMetadata(job BackupJob, timestamp string, startTime time.Time) (string, error) {
+	folderName := fmt.Sprintf("%s_%s", job.Source, timestamp)
+	folderPath := filepath.Join(job.Destination, folderName)
+	filename := fmt.Sprintf("%s.sql", job.Source)
+	fullPath := filepath.Join(folderPath, filename)
+
+	os.MkdirAll(folderPath, 0755)
+
+	err := backupPostgres(job.Source, folderPath, timestamp)
+	if err != nil {
+		return "", err
+	}
+
+	endTime := time.Now()
+	duration := endTime.Sub(startTime)
+	
+	fileSize, _ := getFileSize(fullPath)
+	
+	metadata := BackupMetadata{
+		JobID:       job.ID,
+		JobName:     job.Name,
+		BackupType:  job.Type,
+		Source:      job.Source,
+		BackupFile:  folderName,
+		Timestamp:   startTime,
+		FileSize:    fileSize,
+		FileSizeStr: formatFileSize(fileSize),
+		Duration:    duration.String(),
+		Status:      "completed",
+	}
+
+	saveBackupMetadata(metadata, filepath.Join(folderPath, "metadata.json"))
+	return folderPath, nil
+}
+
 func backupPostgres(dbName, destination, timestamp string) error {
-	filename := fmt.Sprintf("%s_%s.sql", dbName, timestamp)
+	filename := fmt.Sprintf("%s.sql", dbName)
 	fullPath := filepath.Join(destination, filename)
 
 	os.MkdirAll(destination, 0755)
@@ -750,8 +953,43 @@ func backupPostgres(dbName, destination, timestamp string) error {
 	return cmd.Run()
 }
 
+func backupMySQLWithMetadata(job BackupJob, timestamp string, startTime time.Time) (string, error) {
+	folderName := fmt.Sprintf("%s_%s", job.Source, timestamp)
+	folderPath := filepath.Join(job.Destination, folderName)
+	filename := fmt.Sprintf("%s.sql", job.Source)
+	fullPath := filepath.Join(folderPath, filename)
+
+	os.MkdirAll(folderPath, 0755)
+
+	err := backupMySQL(job.Source, folderPath, timestamp)
+	if err != nil {
+		return "", err
+	}
+
+	endTime := time.Now()
+	duration := endTime.Sub(startTime)
+	
+	fileSize, _ := getFileSize(fullPath)
+	
+	metadata := BackupMetadata{
+		JobID:       job.ID,
+		JobName:     job.Name,
+		BackupType:  job.Type,
+		Source:      job.Source,
+		BackupFile:  folderName,
+		Timestamp:   startTime,
+		FileSize:    fileSize,
+		FileSizeStr: formatFileSize(fileSize),
+		Duration:    duration.String(),
+		Status:      "completed",
+	}
+
+	saveBackupMetadata(metadata, filepath.Join(folderPath, "metadata.json"))
+	return folderPath, nil
+}
+
 func backupMySQL(dbName, destination, timestamp string) error {
-	filename := fmt.Sprintf("%s_%s.sql", dbName, timestamp)
+	filename := fmt.Sprintf("%s.sql", dbName)
 	fullPath := filepath.Join(destination, filename)
 
 	os.MkdirAll(destination, 0755)
@@ -771,6 +1009,50 @@ func backupMySQL(dbName, destination, timestamp string) error {
 	}
 
 	return cmd.Run()
+}
+
+func backupMongoDBWithMetadata(job BackupJob, connectionString, timestamp string, startTime time.Time) (string, error) {
+	dbName := "database"
+	if strings.Contains(connectionString, "/") {
+		parts := strings.Split(connectionString, "/")
+		if len(parts) > 1 {
+			dbPart := parts[len(parts)-1]
+			if strings.Contains(dbPart, "?") {
+				dbName = strings.Split(dbPart, "?")[0]
+			} else {
+				dbName = dbPart
+			}
+		}
+	}
+
+	dirname := fmt.Sprintf("%s_%s", dbName, timestamp)
+	dirpath := filepath.Join(job.Destination, dirname)
+
+	err := backupMongoDB(connectionString, job.Destination, timestamp)
+	if err != nil {
+		return "", err
+	}
+
+	endTime := time.Now()
+	duration := endTime.Sub(startTime)
+	
+	fileSize, _ := getFileSize(dirpath)
+	
+	metadata := BackupMetadata{
+		JobID:       job.ID,
+		JobName:     job.Name,
+		BackupType:  job.Type,
+		Source:      job.Source,
+		BackupFile:  dirname,
+		Timestamp:   startTime,
+		FileSize:    fileSize,
+		FileSizeStr: formatFileSize(fileSize),
+		Duration:    duration.String(),
+		Status:      "completed",
+	}
+
+	saveBackupMetadata(metadata, filepath.Join(dirpath, "metadata.json"))
+	return dirpath, nil
 }
 
 func backupMongoDB(connectionString, destination, timestamp string) error {
@@ -806,10 +1088,43 @@ func backupMongoDB(connectionString, destination, timestamp string) error {
 	return nil
 }
 
+func backupFileWithMetadata(job BackupJob, timestamp string, startTime time.Time) (string, error) {
+	basename := filepath.Base(job.Source)
+	folderName := fmt.Sprintf("%s_%s", basename, timestamp)
+	folderPath := filepath.Join(job.Destination, folderName)
+
+	os.MkdirAll(folderPath, 0755)
+
+	err := backupFile(job.Source, folderPath, timestamp)
+	if err != nil {
+		return "", err
+	}
+
+	endTime := time.Now()
+	duration := endTime.Sub(startTime)
+	
+	fileSize, _ := getFileSize(folderPath)
+	
+	metadata := BackupMetadata{
+		JobID:       job.ID,
+		JobName:     job.Name,
+		BackupType:  job.Type,
+		Source:      job.Source,
+		BackupFile:  folderName,
+		Timestamp:   startTime,
+		FileSize:    fileSize,
+		FileSizeStr: formatFileSize(fileSize),
+		Duration:    duration.String(),
+		Status:      "completed",
+	}
+
+	saveBackupMetadata(metadata, filepath.Join(folderPath, "metadata.json"))
+	return folderPath, nil
+}
+
 func backupFile(source, destination, timestamp string) error {
 	basename := filepath.Base(source)
-	filename := fmt.Sprintf("%s_%s", basename, timestamp)
-	fullPath := filepath.Join(destination, filename)
+	fullPath := filepath.Join(destination, basename)
 
 	os.MkdirAll(destination, 0755)
 
@@ -822,9 +1137,43 @@ func backupFile(source, destination, timestamp string) error {
 	return cmd.Run()
 }
 
+func backupDirectoryWithMetadata(job BackupJob, timestamp string, startTime time.Time) (string, error) {
+	basename := filepath.Base(job.Source)
+	folderName := fmt.Sprintf("%s_%s", basename, timestamp)
+	folderPath := filepath.Join(job.Destination, folderName)
+
+	os.MkdirAll(folderPath, 0755)
+
+	err := backupDirectory(job.Source, folderPath, timestamp)
+	if err != nil {
+		return "", err
+	}
+
+	endTime := time.Now()
+	duration := endTime.Sub(startTime)
+	
+	fileSize, _ := getFileSize(folderPath)
+	
+	metadata := BackupMetadata{
+		JobID:       job.ID,
+		JobName:     job.Name,
+		BackupType:  job.Type,
+		Source:      job.Source,
+		BackupFile:  folderName,
+		Timestamp:   startTime,
+		FileSize:    fileSize,
+		FileSizeStr: formatFileSize(fileSize),
+		Duration:    duration.String(),
+		Status:      "completed",
+	}
+
+	saveBackupMetadata(metadata, filepath.Join(folderPath, "metadata.json"))
+	return folderPath, nil
+}
+
 func backupDirectory(source, destination, timestamp string) error {
 	basename := filepath.Base(source)
-	filename := fmt.Sprintf("%s_%s.tar.gz", basename, timestamp)
+	filename := fmt.Sprintf("%s.tar.gz", basename)
 	fullPath := filepath.Join(destination, filename)
 
 	os.MkdirAll(destination, 0755)
@@ -911,6 +1260,50 @@ func restoreDirectory(originalPath, backupFile string) error {
 	}
 
 	return cmd.Run()
+}
+
+func formatFileSize(bytes int64) string {
+	const unit = 1024
+	if bytes < unit {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	div, exp := int64(unit), 0
+	for n := bytes / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
+}
+
+func getFileSize(path string) (int64, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, err
+	}
+	
+	if info.IsDir() {
+		var size int64
+		err := filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if !info.IsDir() {
+				size += info.Size()
+			}
+			return nil
+		})
+		return size, err
+	}
+	
+	return info.Size(), nil
+}
+
+func saveBackupMetadata(metadata BackupMetadata, metadataFile string) error {
+	data, err := json.MarshalIndent(metadata, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(metadataFile, data, 0644)
 }
 
 func max(a, b int) int {

@@ -13,6 +13,11 @@ go build -o backup-xd main.go
 cat ~/.local/bin/backup-manager-config.json
 ```
 
+# make it global
+```bash
+cp backup-manager ~/.local/bin/
+```
+
 # Postgres Restore
 
 # 1. Drop and recreate database (if needed)
