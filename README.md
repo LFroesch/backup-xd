@@ -1,41 +1,78 @@
 # backup-xd
 
+A terminal-based backup management system built with Go and Bubble Tea. Create, schedule, and manage backups for databases, files, and directories with an intuitive TUI interface.
 
-# on edit
+## Features
+
+- **Database Backups**: PostgreSQL, MySQL, MongoDB support
+- **File System Backups**: Individual files and directories  
+- **Backup Management**: View, edit, pause/resume, and delete backup jobs
+- **Global Backup View**: Browse all backups across different types
+- **Automated Cleanup**: Remove old backups based on retention policies
+- **Restore Operations**: Quick restore from latest backups
+- **Metadata Tracking**: Detailed backup information and statistics
+
+## Installation
 
 ```bash
-go build -o backup-xd main.go
+make install
 ```
 
-# config file
+This builds the binary and copies it to `~/.local/bin/backup-xd`.
+
+## Configuration
+
+The application stores configuration in `~/.config/backup-xd/`:
+- `config.json` - Backup job definitions
+- `.backup-env` - Environment variables for database connections
+
+### Environment Variables
+
+Set database connection details in `~/.config/backup-xd/.backup-env`:
 
 ```bash
-cat ~/.local/bin/backup-manager-config.json
+# PostgreSQL
+export PGHOST=localhost
+export PGUSER=postgres  
+export PGPASSWORD=your_password
+export PGPORT=5432
+
+# MongoDB connection strings can be stored as environment variables
+export MONGO_URI=mongodb://user:pass@localhost:27017/dbname
 ```
 
-# make it global
-```bash
-cp backup-manager ~/.local/bin/
+## Usage
+
+Run `backup-xd` to open the interactive interface:
+
+- **=� Backup Management**: Create, edit, and run backup jobs
+- **=� View All Backups**: Browse global backup history  
+- **>� Cleanup**: Remove old backups to free space
+- **�Settings**: Configure application preferences
+
+### Backup Types
+
+- `postgres` - PostgreSQL database dumps
+- `mysql` - MySQL database dumps  
+- `mongodb` - MongoDB collections
+- `file` - Individual file backups
+- `directory` - Compressed directory archives
+
+### Schedule Options
+
+- `1h`, `24h`, `7d` - Recurring intervals
+- `oneoff` - Single execution (marked completed after run)
+
+## Backup Storage
+
+Backups are organized in `~/backups/backup-xd/` by type:
+```
+~/backups/backup-xd/
+postgres/
+mysql/
+mongodb/
+files/
+directories/
 ```
 
-# Postgres Restore
-
-# 1. Drop and recreate database (if needed)
-dropdb gator
-createdb gator
-
-# 2. Restore from backup
-psql -h localhost -U postgres -d gator -f ./backups/postgres/gator_123456.sql
-
-# 3. Or with environment variables
-source ~/.backup-env
-psql -h $PGHOST -U $PGUSER -d gator -f ./backups/postgres/gator_123456.sql
-
-# MongoDB Restore
-
-# 1. Restore to same database (with --drop to replace existing data)
-source ~/.backup-env
-mongorestore --uri="$PROJECT_MANAGER_MONGODB_URI" --drop ./backups/mongodb/project-manager_123456/
-
-# 2. Or restore to different database
-mongorestore --uri="mongodb+srv://user:pass@cluster/NEW_DB_NAME" ./backups/mongodb/project-manager_123456/project-manager/
+Each backup includes metadata.json with timestamp, size, and job details.

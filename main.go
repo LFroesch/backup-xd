@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -53,11 +54,28 @@ type BackupConfig struct {
 	NextID int         `json:"next_id"`
 }
 
+// Screen types for navigation
+type screen int
+
+const (
+	screenMain screen = iota
+	screenBackupManagement
+	screenSettings
+	screenGlobalBackups
+	screenBackupView
+	screenBackupClean
+)
+
 type model struct {
 	jobs       []BackupJob
 	table      table.Model
 	config     BackupConfig
 	configFile string
+
+	// Navigation
+	screen screen
+	cursor int
+	message string
 
 	// Edit mode
 	editMode  bool
@@ -69,6 +87,21 @@ type model struct {
 	deleteMode       bool
 	deleteTargetIdx  int
 	deleteTargetName string
+
+	// Global backup viewing
+	globalBackups     []BackupMetadata
+	selectedBackup    *BackupMetadata
+	
+	// Global backup delete confirmation
+	globalDeleteMode       bool
+	globalDeleteTargetIdx  int
+	globalDeleteTargetName string
+
+	// Cleanup functionality
+	cleanupMode       bool
+	cleanupDays       int
+	cleanupConfirm    bool
+	cleanupPreview    []BackupMetadata
 
 	width        int
 	height       int
@@ -184,7 +217,72 @@ func getBackupBaseDir() string {
 	return filepath.Join(homeDir, "backups")
 }
 
-func main() {
+// Add this function to scan all global backups
+func scanGlobalBackups() []BackupMetadata {
+	backupBaseDir := getBackupBaseDir()
+	var allBackups []BackupMetadata
+
+	// Scan all backup type directories
+	backupTypes := []string{"postgres", "mysql", "mongodb", "files", "directories"}
+
+	for _, backupType := range backupTypes {
+		typeDir := filepath.Join(backupBaseDir, "backup-xd", backupType)
+
+		entries, err := os.ReadDir(typeDir)
+		if err != nil {
+			continue // Directory doesn't exist, skip
+		}
+
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+
+			// Look for metadata.json in each backup directory
+			metadataPath := filepath.Join(typeDir, entry.Name(), "metadata.json")
+			if metadata, err := loadBackupMetadata(metadataPath); err == nil {
+				allBackups = append(allBackups, metadata)
+			}
+		}
+	}
+
+	// Sort by timestamp (newest first)
+	sort.Slice(allBackups, func(i, j int) bool {
+		return allBackups[i].Timestamp.After(allBackups[j].Timestamp)
+	})
+
+	return allBackups
+}
+
+// Add this function to load backup metadata
+func loadBackupMetadata(metadataPath string) (BackupMetadata, error) {
+	var metadata BackupMetadata
+	data, err := os.ReadFile(metadataPath)
+	if err != nil {
+		return metadata, err
+	}
+
+	err = json.Unmarshal(data, &metadata)
+	return metadata, err
+}
+
+// Add this function to get old backups for cleanup
+func getOldBackups(days int) []BackupMetadata {
+	allBackups := scanGlobalBackups()
+	cutoffDate := time.Now().AddDate(0, 0, -days)
+
+	var oldBackups []BackupMetadata
+	for _, backup := range allBackups {
+		if backup.Timestamp.Before(cutoffDate) {
+			oldBackups = append(oldBackups, backup)
+		}
+	}
+
+	return oldBackups
+}
+
+// NewModel creates a new model with initialized values
+func NewModel() model {
 	// Load environment variables from ~/.backup-env
 	loadEnvironmentFile()
 
@@ -200,12 +298,16 @@ func main() {
 		jobs:       config.Jobs,
 		config:     config,
 		configFile: configFile,
+		screen:     screenMain,
+		cursor:     0,
 		width:      100,
 		height:     24,
 		editMode:   false,
 		editRow:    -1,
 		editCol:    -1,
 		lastUpdate: time.Now(),
+		globalBackups: scanGlobalBackups(),
+		cleanupDays:   30, // Default cleanup period
 	}
 
 	// Initialize text input for editing
@@ -248,6 +350,12 @@ func main() {
 
 	m.table = t
 	m.updateTable()
+
+	return m
+}
+
+func main() {
+	m := NewModel()
 
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
@@ -516,56 +624,171 @@ func (m model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "q", "ctrl+c":
 		return m, tea.Quit
-	case "e":
-		m.startEdit()
-		return m, nil
-	case "n", "a":
-		newJob := BackupJob{
-			ID:          m.config.NextID,
-			Name:        "New Backup Job",
-			Source:      "/path/to/source",
-			Destination: "./backups/",
-			Type:        "file",
-			Schedule:    "oneoff",
-			Status:      "active",
-			LastResult:  "Not run",
-			CreatedAt:   time.Now(),
+	case "up", "k":
+		if m.globalDeleteMode {
+			return m, nil // Disable navigation during delete confirmation
 		}
-		m.config.NextID++
-		m.jobs = append(m.jobs, newJob)
-		m.config.Jobs = m.jobs
-		saveConfig(m.config, m.configFile)
-		m.updateTable()
-		m.table.SetCursor(len(m.jobs) - 1)
-		m.startEdit()
-		return m, showStatus("➕ New backup job added")
-	case "d", "delete":
-		if len(m.jobs) > 0 {
+		if m.screen == screenBackupManagement {
+			// Let the table handle navigation for backup management
+			var cmd tea.Cmd
+			m.table, cmd = m.table.Update(msg)
+			return m, cmd
+		} else {
+			// Handle menu navigation for other screens
+			if m.cursor > 0 {
+				m.cursor--
+			}
+		}
+		return m, nil
+	case "down", "j":
+		if m.globalDeleteMode {
+			return m, nil // Disable navigation during delete confirmation
+		}
+		if m.screen == screenBackupManagement {
+			// Let the table handle navigation for backup management
+			var cmd tea.Cmd
+			m.table, cmd = m.table.Update(msg)
+			return m, cmd
+		} else {
+			// Handle menu navigation for other screens
+			maxCursor := m.getMaxCursor()
+			if m.cursor < maxCursor {
+				m.cursor++
+			}
+		}
+		return m, nil
+	case "enter":
+		if m.screen == screenBackupManagement {
+			// In backup management, enter runs the selected backup
+			if len(m.jobs) > 0 {
+				job := m.jobs[m.table.Cursor()]
+				return m, m.runBackup(job.ID)
+			}
+			return m, nil
+		} else {
+			// In other screens, enter handles menu navigation
+			return m.handleEnter()
+		}
+	case "esc":
+		if m.globalDeleteMode {
+			m.globalDeleteMode = false
+			m.globalDeleteTargetIdx = -1
+			m.globalDeleteTargetName = ""
+			return m, nil
+		}
+		if m.screen != screenMain {
+			m.screen = screenMain
+			m.cursor = 0
+			m.message = ""
+			m.cleanupConfirm = false
+			return m, nil
+		}
+		return m, tea.Quit
+	case "v":
+		if m.screen == screenGlobalBackups && len(m.globalBackups) > 0 && !m.globalDeleteMode {
+			return m.handleViewBackupDetails()
+		}
+	case "d":
+		if m.screen == screenGlobalBackups && len(m.globalBackups) > 0 && !m.globalDeleteMode {
+			return m.handleDeleteGlobalBackup()
+		}
+	case "c":
+		if m.screen == screenBackupClean && len(m.cleanupPreview) > 0 && !m.cleanupConfirm {
+			m.cleanupConfirm = true
+			return m, nil
+		}
+	case "y":
+		if m.screen == screenBackupClean && m.cleanupConfirm {
+			return m.performCleanup()
+		}
+		if m.screen == screenGlobalBackups && m.globalDeleteMode {
+			return m.performGlobalBackupDelete()
+		}
+	case "n":
+		if m.screen == screenBackupClean && m.cleanupConfirm {
+			m.cleanupConfirm = false
+			return m, nil
+		}
+		if m.screen == screenGlobalBackups && m.globalDeleteMode {
+			m.globalDeleteMode = false
+			m.globalDeleteTargetIdx = -1
+			m.globalDeleteTargetName = ""
+			return m, nil
+		}
+	case "+", "=":
+		if m.screen == screenBackupClean && !m.cleanupConfirm {
+			if m.cleanupDays < 365 {
+				m.cleanupDays++
+				m.cleanupPreview = getOldBackups(m.cleanupDays)
+				m.message = fmt.Sprintf("Cleanup period set to %d days", m.cleanupDays)
+			}
+		}
+	case "-", "_":
+		if m.screen == screenBackupClean && !m.cleanupConfirm {
+			if m.cleanupDays > 1 {
+				m.cleanupDays--
+				m.cleanupPreview = getOldBackups(m.cleanupDays)
+				m.message = fmt.Sprintf("Cleanup period set to %d days", m.cleanupDays)
+			}
+		}
+
+	// Keep the old backup management functionality for when in the backup management screen
+	case "e":
+		if m.screen == screenBackupManagement {
+			m.startEdit()
+		}
+		return m, nil
+	case "a":
+		if m.screen == screenBackupManagement {
+			newJob := BackupJob{
+				ID:          m.config.NextID,
+				Name:        "New Backup Job",
+				Source:      "/path/to/source",
+				Destination: "./backups/",
+				Type:        "file",
+				Schedule:    "oneoff",
+				Status:      "active",
+				LastResult:  "Not run",
+				CreatedAt:   time.Now(),
+			}
+			m.config.NextID++
+			m.jobs = append(m.jobs, newJob)
+			m.config.Jobs = m.jobs
+			saveConfig(m.config, m.configFile)
+			m.updateTable()
+			m.table.SetCursor(len(m.jobs) - 1)
+			m.startEdit()
+			return m, showStatus("➕ New backup job added")
+		}
+	case "delete":
+		if m.screen == screenBackupManagement && len(m.jobs) > 0 {
 			idx := m.table.Cursor()
 			m.deleteMode = true
 			m.deleteTargetIdx = idx
 			m.deleteTargetName = m.jobs[idx].Name
 		}
 		return m, nil
-	case " ", "enter":
-		if len(m.jobs) > 0 {
+	case " ":
+		if m.screen == screenBackupManagement && len(m.jobs) > 0 {
 			job := m.jobs[m.table.Cursor()]
 			return m, m.runBackup(job.ID)
 		}
 		return m, nil
 	case "ctrl+r":
-		if len(m.jobs) > 0 {
+		if m.screen == screenBackupManagement && len(m.jobs) > 0 {
 			job := m.jobs[m.table.Cursor()]
 			return m, m.showRestoreOptions(job)
 		}
 		return m, nil
 	case "r":
-		m.config = loadBackupConfig(m.configFile)
-		m.jobs = m.config.Jobs
-		m.updateTable()
-		return m, showStatus("🔄 Refreshed")
+		if m.screen == screenBackupManagement {
+			m.config = loadBackupConfig(m.configFile)
+			m.jobs = m.config.Jobs
+			m.updateTable()
+			return m, showStatus("🔄 Refreshed")
+		}
 	case "p":
-		if len(m.jobs) > 0 {
+		if m.screen == screenBackupManagement && len(m.jobs) > 0 {
 			idx := m.table.Cursor()
 			currentStatus := m.jobs[idx].Status
 
@@ -589,9 +812,11 @@ func (m model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	default:
-		var cmd tea.Cmd
-		m.table, cmd = m.table.Update(msg)
-		return m, cmd
+		if m.screen == screenBackupManagement {
+			var cmd tea.Cmd
+			m.table, cmd = m.table.Update(msg)
+			return m, cmd
+		}
 	}
 
 	return m, nil
@@ -740,7 +965,7 @@ func findBackupsForJob(job BackupJob) ([]string, error) {
 		}
 
 		for _, entry := range entries {
-			if entry.IsDir() && strings.HasPrefix(entry.Name(), job.Source+"_") {
+			if entry.IsDir() && strings.HasPrefix(entry.Name(), strings.ReplaceAll(job.Name, " ", "_")+"_") {
 				// Check if the SQL file exists inside the directory
 				sqlFile := filepath.Join(expandedDestination, entry.Name(), job.Source+".sql")
 				if _, err := os.Stat(sqlFile); err == nil {
@@ -756,13 +981,13 @@ func findBackupsForJob(job BackupJob) ([]string, error) {
 		}
 
 		for _, entry := range entries {
-			if entry.IsDir() && strings.Contains(entry.Name(), "_") {
+			if entry.IsDir() && strings.HasPrefix(entry.Name(), strings.ReplaceAll(job.Name, " ", "_")+"_") {
 				backupFiles = append(backupFiles, filepath.Join(expandedDestination, entry.Name()))
 			}
 		}
 
 	case "file":
-		// Look for backup directories with pattern {basename}_{timestamp}
+		// Look for backup directories with pattern {jobName}_{timestamp}
 		entries, err := os.ReadDir(expandedDestination)
 		if err != nil {
 			return nil, err
@@ -771,7 +996,7 @@ func findBackupsForJob(job BackupJob) ([]string, error) {
 		expandedSource := expandPath(job.Source)
 		baseName := filepath.Base(expandedSource)
 		for _, entry := range entries {
-			if entry.IsDir() && strings.HasPrefix(entry.Name(), baseName+"_") {
+			if entry.IsDir() && strings.HasPrefix(entry.Name(), strings.ReplaceAll(job.Name, " ", "_")+"_") {
 				// Check if the file exists inside the directory
 				backupFile := filepath.Join(expandedDestination, entry.Name(), baseName)
 				if _, err := os.Stat(backupFile); err == nil {
@@ -781,7 +1006,7 @@ func findBackupsForJob(job BackupJob) ([]string, error) {
 		}
 
 	case "directory":
-		// Look for backup directories with pattern {basename}_{timestamp}
+		// Look for backup directories with pattern {jobName}_{timestamp}
 		entries, err := os.ReadDir(expandedDestination)
 		if err != nil {
 			return nil, err
@@ -790,7 +1015,7 @@ func findBackupsForJob(job BackupJob) ([]string, error) {
 		expandedSource := expandPath(job.Source)
 		baseName := filepath.Base(expandedSource)
 		for _, entry := range entries {
-			if entry.IsDir() && strings.HasPrefix(entry.Name(), baseName+"_") {
+			if entry.IsDir() && strings.HasPrefix(entry.Name(), strings.ReplaceAll(job.Name, " ", "_")+"_") {
 				// Check if the tar.gz file exists inside the directory
 				tarFile := filepath.Join(expandedDestination, entry.Name(), baseName+".tar.gz")
 				if _, err := os.Stat(tarFile); err == nil {
@@ -803,7 +1028,316 @@ func findBackupsForJob(job BackupJob) ([]string, error) {
 	return backupFiles, nil
 }
 
+// Add new menu option in renderMain
+func (m model) renderMain() string {
+	options := []string{
+		"📋 Backup Management",
+		"💾 View All Backups (Global)",
+		"🧹 Cleanup Old Backups",
+		"⚙️  Settings",
+		"❌ Quit",
+	}
+
+	header := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("99")).
+		Render("backup-xd - Backup Management")
+
+	selectedStyle := lipgloss.NewStyle().
+		Background(lipgloss.Color("57")).
+		Foreground(lipgloss.Color("230"))
+
+	normalStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("252"))
+
+	var rows []string
+	for i, option := range options {
+		if i == m.cursor {
+			rows = append(rows, selectedStyle.Render("> "+option))
+		} else {
+			rows = append(rows, normalStyle.Render("  "+option))
+		}
+	}
+
+	instructions := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("240")).
+		Render("\nPress Enter to select, ↑↓ to navigate, q to quit")
+
+	messageStr := ""
+	if m.message != "" {
+		messageStr = "\n\n" + lipgloss.NewStyle().
+			Foreground(lipgloss.Color("226")).
+			Render(m.message)
+	}
+
+	return fmt.Sprintf("%s\n\n%s%s%s", header, strings.Join(rows, "\n"), instructions, messageStr)
+}
+
+// Add rendering function for global backups
+func (m model) renderGlobalBackups() string {
+	if len(m.globalBackups) == 0 {
+		return "No backups found in global backup directory.\n\nPress ESC to go back"
+	}
+
+	header := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("99")).
+		Render(fmt.Sprintf("💾 Global Backups (%d total)", len(m.globalBackups)))
+
+	selectedStyle := lipgloss.NewStyle().
+		Background(lipgloss.Color("57")).
+		Foreground(lipgloss.Color("230"))
+
+	normalStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("252"))
+
+	var rows []string
+	for i, backup := range m.globalBackups {
+		// Format: JobName | Type | Size | Age | Status
+		age := formatAge(backup.Timestamp)
+		row := fmt.Sprintf("%-20s %-10s %-10s %-10s %s",
+			truncate(backup.JobName, 20),
+			backup.BackupType,
+			backup.FileSizeStr,
+			age,
+			backup.Status)
+
+		if i == m.cursor {
+			row = selectedStyle.Render("> " + row)
+		} else {
+			row = normalStyle.Render("  " + row)
+		}
+
+		rows = append(rows, row)
+	}
+
+	var instructions string
+	if m.globalDeleteMode {
+		deleteStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#DC2626")).
+			Bold(true)
+
+		instructions = deleteStyle.Render(fmt.Sprintf("\n🗑️  Delete backup '%s'? ", m.globalDeleteTargetName)) +
+			lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("y: yes • n/esc: no")
+	} else {
+		instructions = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("240")).
+			Render("\nPress 'v' to view details, 'd' to delete, ESC to go back")
+	}
+
+	messageStr := ""
+	if m.message != "" {
+		messageStr = "\n\n" + lipgloss.NewStyle().
+			Foreground(lipgloss.Color("226")).
+			Render(m.message)
+	}
+
+	return fmt.Sprintf("%s\n\n%s%s%s", header, strings.Join(rows, "\n"), instructions, messageStr)
+}
+
+// Add rendering function for backup cleanup
+func (m model) renderBackupClean() string {
+	header := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("99")).
+		Render("🧹 Cleanup Old Backups")
+
+	settingsText := fmt.Sprintf("Cleanup backups older than: %d days\n\n", m.cleanupDays)
+
+	if len(m.cleanupPreview) > 0 {
+		settingsText += fmt.Sprintf("Found %d backups to delete:\n", len(m.cleanupPreview))
+
+		var totalSize int64
+		for _, backup := range m.cleanupPreview {
+			settingsText += fmt.Sprintf("  • %s (%s) - %s\n",
+				backup.JobName,
+				backup.FileSizeStr,
+				formatAge(backup.Timestamp))
+			totalSize += backup.FileSize
+		}
+
+		settingsText += fmt.Sprintf("\nTotal space to reclaim: %s\n", formatFileSize(totalSize))
+
+		if m.cleanupConfirm {
+			settingsText += "\n⚠️  Are you sure you want to delete these backups? This cannot be undone!"
+		}
+	} else {
+		settingsText += "No backups older than this period found."
+	}
+
+	var instructions string
+	if m.cleanupConfirm {
+		instructions = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("240")).
+			Render("\nPress 'y' to confirm deletion, 'n' or ESC to cancel")
+	} else {
+		instructions = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("240")).
+			Render("\nPress +/- to adjust days, 'c' to clean, ESC to go back")
+	}
+
+	messageStr := ""
+	if m.message != "" {
+		messageStr = "\n\n" + lipgloss.NewStyle().
+			Foreground(lipgloss.Color("226")).
+			Render(m.message)
+	}
+
+	return fmt.Sprintf("%s\n\n%s%s%s", header, settingsText, instructions, messageStr)
+}
+
+// Update handleEnter to handle new menu options
+func (m model) handleEnter() (model, tea.Cmd) {
+	switch m.screen {
+	case screenMain:
+		switch m.cursor {
+		case 0: // Backup Management
+			m.screen = screenBackupManagement
+		case 1: // View All Backups (Global)
+			m.screen = screenGlobalBackups
+			m.globalBackups = scanGlobalBackups() // Refresh the list
+		case 2: // Cleanup Old Backups
+			m.screen = screenBackupClean
+			m.cleanupPreview = getOldBackups(m.cleanupDays)
+		case 3: // Settings
+			m.screen = screenSettings
+		case 4: // Quit
+			return m, tea.Quit
+		}
+		m.cursor = 0
+		m.message = ""
+	}
+
+	return m, nil
+}
+
+// Update getMaxCursor to handle new screens
+func (m model) getMaxCursor() int {
+	switch m.screen {
+	case screenMain:
+		return 4 // Updated to account for new menu options
+	case screenGlobalBackups:
+		return len(m.globalBackups) - 1
+	case screenBackupClean:
+		return 0 // No cursor navigation needed
+	default:
+		return 0
+	}
+}
+
+// Add handler functions
+func (m model) handleViewBackupDetails() (model, tea.Cmd) {
+	if m.cursor < len(m.globalBackups) {
+		backup := m.globalBackups[m.cursor]
+		m.selectedBackup = &backup
+		m.screen = screenBackupView
+		m.cursor = 0
+	}
+	return m, nil
+}
+
+func (m model) handleDeleteGlobalBackup() (model, tea.Cmd) {
+	if m.cursor < len(m.globalBackups) {
+		backup := m.globalBackups[m.cursor]
+		m.globalDeleteMode = true
+		m.globalDeleteTargetIdx = m.cursor
+		m.globalDeleteTargetName = backup.JobName
+	}
+	return m, nil
+}
+
+func (m model) performGlobalBackupDelete() (model, tea.Cmd) {
+	if m.globalDeleteTargetIdx >= 0 && m.globalDeleteTargetIdx < len(m.globalBackups) {
+		backup := m.globalBackups[m.globalDeleteTargetIdx]
+		backupBaseDir := getBackupBaseDir()
+		
+		// Map job types to directory names
+		dirName := backup.BackupType
+		switch backup.BackupType {
+		case "file":
+			dirName = "files"
+		case "directory":
+			dirName = "directories"
+		}
+		
+		backupPath := filepath.Join(backupBaseDir, "backup-xd", dirName, backup.BackupFile)
+		
+		// Try to delete the backup
+		if err := os.RemoveAll(backupPath); err != nil {
+			m.message = fmt.Sprintf("❌ Failed to delete backup: %v", err)
+		} else {
+			m.message = fmt.Sprintf("✅ Deleted backup: %s", backup.JobName)
+			// Remove from the slice
+			m.globalBackups = append(m.globalBackups[:m.globalDeleteTargetIdx], m.globalBackups[m.globalDeleteTargetIdx+1:]...)
+			// Adjust cursor if necessary
+			if m.cursor >= len(m.globalBackups) && len(m.globalBackups) > 0 {
+				m.cursor = len(m.globalBackups) - 1
+			} else if len(m.globalBackups) == 0 {
+				m.cursor = 0
+			}
+		}
+	}
+	
+	// Reset delete mode
+	m.globalDeleteMode = false
+	m.globalDeleteTargetIdx = -1
+	m.globalDeleteTargetName = ""
+	
+	return m, nil
+}
+
+func (m model) performCleanup() (model, tea.Cmd) {
+	var deletedCount int
+	var errors []string
+	var reclaimedSize int64
+
+	backupBaseDir := getBackupBaseDir()
+
+	for _, backup := range m.cleanupPreview {
+		// Construct the full path to the backup directory
+		backupPath := filepath.Join(backupBaseDir, "backup-xd", backup.BackupType, backup.BackupFile)
+
+		if err := os.RemoveAll(backupPath); err != nil {
+			errors = append(errors, fmt.Sprintf("Failed to delete %s: %v", backup.JobName, err))
+		} else {
+			deletedCount++
+			reclaimedSize += backup.FileSize
+		}
+	}
+
+	// Refresh the global backups list
+	m.globalBackups = scanGlobalBackups()
+	m.cleanupPreview = getOldBackups(m.cleanupDays)
+	m.cleanupConfirm = false
+
+	if len(errors) > 0 {
+		m.message = fmt.Sprintf("✅ Deleted %d backups (%s reclaimed). ❌ Errors: %s",
+			deletedCount, formatFileSize(reclaimedSize), strings.Join(errors, "; "))
+	} else {
+		m.message = fmt.Sprintf("✅ Cleaned up %d backups, reclaimed %s",
+			deletedCount, formatFileSize(reclaimedSize))
+	}
+
+	return m, nil
+}
+
 func (m model) View() string {
+	// Handle different screens
+	switch m.screen {
+	case screenMain:
+		return m.renderMain()
+	case screenBackupManagement:
+		return m.ViewOld() // Use the original backup management view
+	case screenGlobalBackups:
+		return m.renderGlobalBackups()
+	case screenBackupClean:
+		return m.renderBackupClean()
+	default:
+		return "Screen not implemented yet"
+	}
+}
+
+func (m model) ViewOld() string {
 	// Define styles
 	errorStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#EF4444")).
@@ -957,7 +1491,7 @@ func backupPostgresWithMetadata(job BackupJob, timestamp string, startTime time.
 		expandedDestination = backupDir
 	}
 
-	folderName := fmt.Sprintf("%s_%s", job.Source, timestamp)
+	folderName := fmt.Sprintf("%s_%s", strings.ReplaceAll(job.Name, " ", "_"), timestamp)
 	folderPath := filepath.Join(expandedDestination, folderName)
 	filename := fmt.Sprintf("%s.sql", job.Source)
 	fullPath := filepath.Join(folderPath, filename)
@@ -1043,7 +1577,7 @@ func backupMySQLWithMetadata(job BackupJob, timestamp string, startTime time.Tim
 		expandedDestination = backupDir
 	}
 
-	folderName := fmt.Sprintf("%s_%s", job.Source, timestamp)
+	folderName := fmt.Sprintf("%s_%s", strings.ReplaceAll(job.Name, " ", "_"), timestamp)
 	folderPath := filepath.Join(expandedDestination, folderName)
 	filename := fmt.Sprintf("%s.sql", job.Source)
 	fullPath := filepath.Join(folderPath, filename)
@@ -1112,23 +1646,10 @@ func backupMongoDBWithMetadata(job BackupJob, connectionString, timestamp string
 		expandedDestination = backupDir
 	}
 
-	dbName := "database"
-	if strings.Contains(connectionString, "/") {
-		parts := strings.Split(connectionString, "/")
-		if len(parts) > 1 {
-			dbPart := parts[len(parts)-1]
-			if strings.Contains(dbPart, "?") {
-				dbName = strings.Split(dbPart, "?")[0]
-			} else {
-				dbName = dbPart
-			}
-		}
-	}
-
-	dirname := fmt.Sprintf("%s_%s", dbName, timestamp)
+	dirname := fmt.Sprintf("%s_%s", strings.ReplaceAll(job.Name, " ", "_"), timestamp)
 	dirpath := filepath.Join(expandedDestination, dirname)
 
-	err := backupMongoDB(connectionString, expandedDestination, timestamp)
+	err := backupMongoDB(connectionString, expandedDestination, timestamp, job.Name)
 	if err != nil {
 		return "", err
 	}
@@ -1156,21 +1677,8 @@ func backupMongoDBWithMetadata(job BackupJob, connectionString, timestamp string
 	return dirpath, nil
 }
 
-func backupMongoDB(connectionString, destination, timestamp string) error {
-	dbName := "database"
-	if strings.Contains(connectionString, "/") {
-		parts := strings.Split(connectionString, "/")
-		if len(parts) > 1 {
-			dbPart := parts[len(parts)-1]
-			if strings.Contains(dbPart, "?") {
-				dbName = strings.Split(dbPart, "?")[0]
-			} else {
-				dbName = dbPart
-			}
-		}
-	}
-
-	dirname := fmt.Sprintf("%s_%s", dbName, timestamp)
+func backupMongoDB(connectionString, destination, timestamp, jobName string) error {
+	dirname := fmt.Sprintf("%s_%s", strings.ReplaceAll(jobName, " ", "_"), timestamp)
 	dirpath := filepath.Join(destination, dirname)
 
 	os.MkdirAll(destination, 0755)
@@ -1201,8 +1709,7 @@ func backupFileWithMetadata(job BackupJob, timestamp string, startTime time.Time
 	}
 
 	expandedSource := expandPath(job.Source)
-	basename := filepath.Base(expandedSource)
-	folderName := fmt.Sprintf("%s_%s", basename, timestamp)
+	folderName := fmt.Sprintf("%s_%s", strings.ReplaceAll(job.Name, " ", "_"), timestamp)
 	folderPath := filepath.Join(expandedDestination, folderName)
 
 	os.MkdirAll(folderPath, 0755)
@@ -1262,8 +1769,7 @@ func backupDirectoryWithMetadata(job BackupJob, timestamp string, startTime time
 	}
 
 	expandedSource := expandPath(job.Source)
-	basename := filepath.Base(expandedSource)
-	folderName := fmt.Sprintf("%s_%s", basename, timestamp)
+	folderName := fmt.Sprintf("%s_%s", strings.ReplaceAll(job.Name, " ", "_"), timestamp)
 	folderPath := filepath.Join(expandedDestination, folderName)
 
 	os.MkdirAll(folderPath, 0755)
@@ -1429,6 +1935,26 @@ func saveBackupMetadata(metadata BackupMetadata, metadataFile string) error {
 		return err
 	}
 	return os.WriteFile(metadataFile, data, 0644)
+}
+
+// Add helper functions
+func formatAge(timestamp time.Time) string {
+	age := time.Since(timestamp)
+
+	if age < time.Hour {
+		return fmt.Sprintf("%dm", int(age.Minutes()))
+	} else if age < 24*time.Hour {
+		return fmt.Sprintf("%dh", int(age.Hours()))
+	} else {
+		return fmt.Sprintf("%dd", int(age.Hours()/24))
+	}
+}
+
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-3] + "..."
 }
 
 func max(a, b int) int {

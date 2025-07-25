@@ -3,3 +3,5 @@ build:
 
 cp:
 	cp backup-xd ~/.local/bin/
+
+install: build cp
