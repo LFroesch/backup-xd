@@ -50,8 +50,17 @@ type BackupMetadata struct {
 }
 
 type BackupConfig struct {
-	Jobs   []BackupJob `json:"jobs"`
-	NextID int         `json:"next_id"`
+	Jobs     []BackupJob `json:"jobs"`
+	NextID   int         `json:"next_id"`
+	Settings Settings    `json:"settings"`
+}
+
+type Settings struct {
+	BackupBasePath    string `json:"backup_base_path"`
+	DefaultRetention  int    `json:"default_retention_days"`
+	ColorTheme        string `json:"color_theme"` // "default" or "alternative"
+	AutoRefresh       bool   `json:"auto_refresh"`
+	VerifyBackups     bool   `json:"verify_backups"`
 }
 
 // Screen types for navigation
@@ -102,6 +111,16 @@ type model struct {
 	cleanupDays       int
 	cleanupConfirm    bool
 	cleanupPreview    []BackupMetadata
+
+	// Search/filter
+	searchMode   bool
+	searchQuery  string
+	filteredJobs []BackupJob
+
+	// Settings edit mode
+	settingsEditMode bool
+	settingsEditRow  int
+	settingsInput    textinput.Model
 
 	width        int
 	height       int
@@ -191,12 +210,31 @@ func loadBackupConfig(configFile string) BackupConfig {
 				},
 			},
 			NextID: 2,
+			Settings: Settings{
+				BackupBasePath:   backupBaseDir,
+				DefaultRetention: 30,
+				ColorTheme:       "default",
+				AutoRefresh:      true,
+				VerifyBackups:    true,
+			},
 		}
 		saveConfig(config, configFile)
 		return config
 	}
 
 	json.Unmarshal(data, &config)
+
+	// Ensure settings have defaults if not set
+	if config.Settings.BackupBasePath == "" {
+		config.Settings.BackupBasePath = getBackupBaseDir()
+	}
+	if config.Settings.DefaultRetention == 0 {
+		config.Settings.DefaultRetention = 30
+	}
+	if config.Settings.ColorTheme == "" {
+		config.Settings.ColorTheme = "default"
+	}
+
 	return config
 }
 
@@ -217,9 +255,19 @@ func getBackupBaseDir() string {
 	return filepath.Join(homeDir, "backups")
 }
 
+func getBackupBaseDirFromSettings(settings Settings) string {
+	if settings.BackupBasePath != "" {
+		return expandPath(settings.BackupBasePath)
+	}
+	return getBackupBaseDir()
+}
+
 // Add this function to scan all global backups
 func scanGlobalBackups() []BackupMetadata {
-	backupBaseDir := getBackupBaseDir()
+	return scanGlobalBackupsWithPath(getBackupBaseDir())
+}
+
+func scanGlobalBackupsWithPath(backupBaseDir string) []BackupMetadata {
 	var allBackups []BackupMetadata
 
 	// Scan all backup type directories
@@ -314,6 +362,10 @@ func NewModel() model {
 	m.textInput = textinput.New()
 	m.textInput.CharLimit = 200
 
+	// Initialize settings input
+	m.settingsInput = textinput.New()
+	m.settingsInput.CharLimit = 500
+
 	// Initialize table
 	columns := []table.Column{
 		{Title: "ID", Width: 4},
@@ -355,6 +407,12 @@ func NewModel() model {
 }
 
 func main() {
+	// Check for daemon mode
+	if len(os.Args) > 1 && os.Args[1] == "daemon" {
+		runDaemon()
+		return
+	}
+
 	m := NewModel()
 
 	p := tea.NewProgram(m, tea.WithAltScreen())
@@ -363,9 +421,156 @@ func main() {
 	}
 }
 
+func runDaemon() {
+	log.Println("Starting backup-xd daemon...")
+
+	// Load environment variables
+	loadEnvironmentFile()
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	configFile := filepath.Join(homeDir, ".config", "backup-xd", "config.json")
+
+	// Main daemon loop
+	for {
+		config := loadBackupConfig(configFile)
+
+		now := time.Now()
+		for i, job := range config.Jobs {
+			// Skip paused, completed, or running jobs
+			if job.Status == "paused" || job.Status == "completed" || job.Status == "running" {
+				continue
+			}
+
+			// Skip oneoff jobs (they don't auto-run)
+			if strings.ToLower(job.Schedule) == "oneoff" {
+				continue
+			}
+
+			// Check if it's time to run this job
+			shouldRun := false
+			if job.LastRun.IsZero() {
+				// Never run before, run now
+				shouldRun = true
+			} else {
+				// Calculate next run based on schedule
+				var nextRun time.Time
+				schedule := strings.ToLower(job.Schedule)
+				switch schedule {
+				case "1h":
+					nextRun = job.LastRun.Add(1 * time.Hour)
+				case "24h":
+					nextRun = job.LastRun.Add(24 * time.Hour)
+				case "7d":
+					nextRun = job.LastRun.Add(7 * 24 * time.Hour)
+				default:
+					log.Printf("Unknown schedule %s for job %s, skipping", job.Schedule, job.Name)
+					continue
+				}
+
+				if now.After(nextRun) {
+					shouldRun = true
+				}
+			}
+
+			if shouldRun {
+				log.Printf("Running scheduled backup: %s (ID: %d)", job.Name, job.ID)
+				config.Jobs[i].Status = "running"
+				saveConfig(config, configFile)
+
+				// Run the backup
+				startTime := time.Now()
+				timestamp := startTime.Format("2006-01-02_15-04-05")
+				var backupErr error
+				var backupPath string
+
+				switch job.Type {
+				case "postgres":
+					backupPath, backupErr = backupPostgresWithMetadata(job, timestamp, startTime)
+				case "mysql":
+					backupPath, backupErr = backupMySQLWithMetadata(job, timestamp, startTime)
+				case "mongodb":
+					connectionString := job.Source
+					if strings.HasPrefix(connectionString, "$") {
+						envVar := strings.TrimPrefix(connectionString, "$")
+						connectionString = os.Getenv(envVar)
+						if connectionString == "" {
+							backupErr = fmt.Errorf("environment variable %s not set", envVar)
+						} else {
+							backupPath, backupErr = backupMongoDBWithMetadata(job, connectionString, timestamp, startTime)
+						}
+					} else {
+						backupPath, backupErr = backupMongoDBWithMetadata(job, connectionString, timestamp, startTime)
+					}
+				case "file":
+					backupPath, backupErr = backupFileWithMetadata(job, timestamp, startTime)
+				case "directory":
+					backupPath, backupErr = backupDirectoryWithMetadata(job, timestamp, startTime)
+				default:
+					backupErr = fmt.Errorf("unknown backup type: %s", job.Type)
+				}
+
+				// Update job status
+				config.Jobs[i].LastRun = time.Now()
+				if backupErr != nil {
+					log.Printf("Backup failed for %s: %v", job.Name, backupErr)
+					config.Jobs[i].Status = "error"
+					config.Jobs[i].LastResult = "Error"
+				} else {
+					// Verify if enabled
+					if config.Settings.VerifyBackups && backupPath != "" {
+						var verifyPath string
+						switch job.Type {
+						case "postgres", "mysql":
+							verifyPath = filepath.Join(backupPath, job.Source+".sql")
+						case "directory":
+							basename := filepath.Base(expandPath(job.Source))
+							verifyPath = filepath.Join(backupPath, basename+".tar.gz")
+						case "file":
+							basename := filepath.Base(expandPath(job.Source))
+							verifyPath = filepath.Join(backupPath, basename)
+						case "mongodb":
+							verifyPath = backupPath
+						default:
+							verifyPath = backupPath
+						}
+
+						if verifyErr := verifyBackup(job.Type, verifyPath); verifyErr != nil {
+							log.Printf("Backup verification failed for %s: %v", job.Name, verifyErr)
+							config.Jobs[i].Status = "error"
+							config.Jobs[i].LastResult = "Verify Failed"
+						} else {
+							log.Printf("Backup completed and verified: %s", job.Name)
+							config.Jobs[i].Status = "active"
+							config.Jobs[i].LastResult = "Success (verified)"
+						}
+					} else {
+						log.Printf("Backup completed: %s", job.Name)
+						config.Jobs[i].Status = "active"
+						config.Jobs[i].LastResult = "Success"
+					}
+				}
+
+				saveConfig(config, configFile)
+			}
+		}
+
+		// Sleep for 1 minute before checking again
+		time.Sleep(1 * time.Minute)
+	}
+}
+
 func (m *model) updateTable() {
 	var rows []table.Row
-	for _, job := range m.jobs {
+	jobsToDisplay := m.jobs
+	if m.filteredJobs != nil {
+		jobsToDisplay = m.filteredJobs
+	}
+
+	for _, job := range jobsToDisplay {
 		lastRun := "Never"
 		if !job.LastRun.IsZero() {
 			lastRun = job.LastRun.Format("01-02 15:04")
@@ -568,6 +773,121 @@ func (m model) updateDelete(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.searchMode = false
+		m.searchQuery = ""
+		m.filteredJobs = nil
+		m.textInput.Blur()
+		m.textInput.SetValue("")
+		m.updateTable()
+		return m, nil
+	case "enter":
+		m.searchMode = false
+		m.searchQuery = m.textInput.Value()
+		m.textInput.Blur()
+
+		// Filter jobs based on search query
+		if m.searchQuery == "" {
+			m.filteredJobs = nil
+		} else {
+			query := strings.ToLower(m.searchQuery)
+			m.filteredJobs = []BackupJob{}
+			for _, job := range m.jobs {
+				if strings.Contains(strings.ToLower(job.Name), query) ||
+					strings.Contains(strings.ToLower(job.Type), query) ||
+					strings.Contains(strings.ToLower(job.Status), query) ||
+					strings.Contains(strings.ToLower(job.Source), query) {
+					m.filteredJobs = append(m.filteredJobs, job)
+				}
+			}
+		}
+		m.updateTable()
+		if len(m.filteredJobs) > 0 {
+			return m, showStatus(fmt.Sprintf("🔍 Found %d matching jobs", len(m.filteredJobs)))
+		} else if m.searchQuery != "" {
+			return m, showStatus("🔍 No matching jobs found")
+		}
+		return m, nil
+	}
+
+	var cmd tea.Cmd
+	m.textInput, cmd = m.textInput.Update(msg)
+	return m, cmd
+}
+
+func (m model) updateSettingsEdit(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.settingsEditMode = false
+		m.settingsEditRow = -1
+		m.settingsInput.Blur()
+		m.settingsInput.SetValue("")
+		return m, nil
+	case "enter":
+		value := m.settingsInput.Value()
+		switch m.settingsEditRow {
+		case 0: // Backup Base Path
+			m.config.Settings.BackupBasePath = value
+		case 1: // Default Retention Days
+			if days, err := strconv.Atoi(value); err == nil && days > 0 {
+				m.config.Settings.DefaultRetention = days
+			}
+		case 2: // Color Theme
+			if value == "default" || value == "alternative" {
+				m.config.Settings.ColorTheme = value
+			}
+		case 3: // Auto Refresh
+			m.config.Settings.AutoRefresh = value == "true" || value == "yes" || value == "1"
+		case 4: // Verify Backups
+			m.config.Settings.VerifyBackups = value == "true" || value == "yes" || value == "1"
+		}
+
+		saveConfig(m.config, m.configFile)
+		m.settingsEditMode = false
+		m.settingsEditRow = -1
+		m.settingsInput.Blur()
+		m.settingsInput.SetValue("")
+		return m, showStatus("✅ Settings updated")
+	case "tab", "down":
+		m.settingsEditRow = (m.settingsEditRow + 1) % 5
+		m.loadSettingsValue()
+		return m, nil
+	case "shift+tab", "up":
+		m.settingsEditRow = (m.settingsEditRow - 1 + 5) % 5
+		m.loadSettingsValue()
+		return m, nil
+	}
+
+	var cmd tea.Cmd
+	m.settingsInput, cmd = m.settingsInput.Update(msg)
+	return m, cmd
+}
+
+func (m *model) loadSettingsValue() {
+	switch m.settingsEditRow {
+	case 0:
+		m.settingsInput.SetValue(m.config.Settings.BackupBasePath)
+	case 1:
+		m.settingsInput.SetValue(strconv.Itoa(m.config.Settings.DefaultRetention))
+	case 2:
+		m.settingsInput.SetValue(m.config.Settings.ColorTheme)
+	case 3:
+		if m.config.Settings.AutoRefresh {
+			m.settingsInput.SetValue("true")
+		} else {
+			m.settingsInput.SetValue("false")
+		}
+	case 4:
+		if m.config.Settings.VerifyBackups {
+			m.settingsInput.SetValue("true")
+		} else {
+			m.settingsInput.SetValue("false")
+		}
+	}
+}
+
 func (m model) updateEdit(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
@@ -621,6 +941,16 @@ func (m model) updateEdit(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Handle search mode
+	if m.searchMode {
+		return m.updateSearch(msg)
+	}
+
+	// Handle settings edit mode
+	if m.settingsEditMode {
+		return m.updateSettingsEdit(msg)
+	}
+
 	switch msg.String() {
 	case "q", "ctrl+c":
 		return m, tea.Quit
@@ -675,6 +1005,13 @@ func (m model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.globalDeleteTargetIdx = -1
 			m.globalDeleteTargetName = ""
 			return m, nil
+		}
+		// Clear search filter when going back
+		if m.screen == screenBackupManagement && m.filteredJobs != nil {
+			m.filteredJobs = nil
+			m.searchQuery = ""
+			m.updateTable()
+			return m, showStatus("🔍 Filter cleared")
 		}
 		if m.screen != screenMain {
 			m.screen = screenMain
@@ -736,6 +1073,11 @@ func (m model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "e":
 		if m.screen == screenBackupManagement {
 			m.startEdit()
+		} else if m.screen == screenSettings {
+			m.settingsEditMode = true
+			m.settingsEditRow = m.cursor
+			m.loadSettingsValue()
+			m.settingsInput.Focus()
 		}
 		return m, nil
 	case "a":
@@ -787,6 +1129,14 @@ func (m model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.updateTable()
 			return m, showStatus("🔄 Refreshed")
 		}
+	case "/":
+		if m.screen == screenBackupManagement {
+			m.searchMode = true
+			m.searchQuery = ""
+			m.textInput.SetValue("")
+			m.textInput.Focus()
+			return m, nil
+		}
 	case "p":
 		if m.screen == screenBackupManagement && len(m.jobs) > 0 {
 			idx := m.table.Cursor()
@@ -831,12 +1181,13 @@ func (m model) runBackup(jobID int) tea.Cmd {
 				startTime := time.Now()
 				timestamp := startTime.Format("2006-01-02_15-04-05")
 				var err error
+				var backupPath string
 
 				switch job.Type {
 				case "postgres":
-					_, err = backupPostgresWithMetadata(job, timestamp, startTime)
+					backupPath, err = backupPostgresWithMetadata(job, timestamp, startTime)
 				case "mysql":
-					_, err = backupMySQLWithMetadata(job, timestamp, startTime)
+					backupPath, err = backupMySQLWithMetadata(job, timestamp, startTime)
 				case "mongodb":
 					connectionString := job.Source
 					if strings.HasPrefix(connectionString, "$") {
@@ -847,11 +1198,11 @@ func (m model) runBackup(jobID int) tea.Cmd {
 							break
 						}
 					}
-					_, err = backupMongoDBWithMetadata(job, connectionString, timestamp, startTime)
+					backupPath, err = backupMongoDBWithMetadata(job, connectionString, timestamp, startTime)
 				case "file":
-					_, err = backupFileWithMetadata(job, timestamp, startTime)
+					backupPath, err = backupFileWithMetadata(job, timestamp, startTime)
 				case "directory":
-					_, err = backupDirectoryWithMetadata(job, timestamp, startTime)
+					backupPath, err = backupDirectoryWithMetadata(job, timestamp, startTime)
 				default:
 					err = fmt.Errorf("unknown backup type: %s", job.Type)
 				}
@@ -864,7 +1215,46 @@ func (m model) runBackup(jobID int) tea.Cmd {
 					}
 				}
 
+				// Verify backup if enabled in settings
+				cfg := loadBackupConfig(m.configFile)
+				verifyEnabled := cfg.Settings.VerifyBackups
+
+				if verifyEnabled && backupPath != "" {
+					// Find the actual backup file/directory to verify
+					var verifyPath string
+					switch job.Type {
+					case "postgres", "mysql":
+						// For SQL backups, path is to directory, need to find .sql file
+						verifyPath = filepath.Join(backupPath, job.Source+".sql")
+					case "directory":
+						// For directories, find the .tar.gz file
+						basename := filepath.Base(expandPath(job.Source))
+						verifyPath = filepath.Join(backupPath, basename+".tar.gz")
+					case "file":
+						// For files, find the original filename
+						basename := filepath.Base(expandPath(job.Source))
+						verifyPath = filepath.Join(backupPath, basename)
+					case "mongodb":
+						// For MongoDB, verify the directory itself
+						verifyPath = backupPath
+					default:
+						verifyPath = backupPath
+					}
+
+					verifyErr := verifyBackup(job.Type, verifyPath)
+					if verifyErr != nil {
+						return backupCompleteMsg{
+							jobID:   jobID,
+							success: false,
+							message: fmt.Sprintf("❌ Backup verification failed: %v", verifyErr),
+						}
+					}
+				}
+
 				successMsg := fmt.Sprintf("✅ Backup completed: %s", job.Name)
+				if verifyEnabled {
+					successMsg += " (verified)"
+				}
 				if strings.ToLower(job.Schedule) == "oneoff" {
 					successMsg += " (OneOff job marked as completed)"
 				}
@@ -1186,6 +1576,73 @@ func (m model) renderBackupClean() string {
 	return fmt.Sprintf("%s\n\n%s%s%s", header, settingsText, instructions, messageStr)
 }
 
+func (m model) renderSettings() string {
+	header := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("99")).
+		Render("⚙️  Settings")
+
+	settings := []struct {
+		name  string
+		value string
+		hint  string
+	}{
+		{"Backup Base Path", m.config.Settings.BackupBasePath, "Path where backups are stored"},
+		{"Default Retention Days", strconv.Itoa(m.config.Settings.DefaultRetention), "Default days to keep backups"},
+		{"Color Theme", m.config.Settings.ColorTheme, "UI color theme (default/alternative)"},
+		{"Auto Refresh", fmt.Sprintf("%t", m.config.Settings.AutoRefresh), "Automatically refresh job list (true/false)"},
+		{"Verify Backups", fmt.Sprintf("%t", m.config.Settings.VerifyBackups), "Verify backup integrity after creation (true/false)"},
+	}
+
+	selectedStyle := lipgloss.NewStyle().
+		Background(lipgloss.Color("57")).
+		Foreground(lipgloss.Color("230"))
+
+	normalStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("252"))
+
+	hintStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("240"))
+
+	var rows []string
+	for i, setting := range settings {
+		line := fmt.Sprintf("%-25s: %s", setting.name, setting.value)
+		hint := hintStyle.Render(fmt.Sprintf("  (%s)", setting.hint))
+
+		if m.settingsEditMode && i == m.settingsEditRow {
+			editStyle := lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#F59E0B")).
+				Bold(true)
+			line = editStyle.Render(fmt.Sprintf("✏️  %-25s: %s", setting.name, m.settingsInput.View()))
+			rows = append(rows, line)
+		} else if i == m.cursor && !m.settingsEditMode {
+			rows = append(rows, selectedStyle.Render("> "+line)+hint)
+		} else {
+			rows = append(rows, normalStyle.Render("  "+line)+hint)
+		}
+	}
+
+	var instructions string
+	if m.settingsEditMode {
+		instructions = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("240")).
+			Render("\nPress Enter to save • Tab/↑↓ to switch fields • ESC to cancel")
+	} else {
+		instructions = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("240")).
+			Render("\nPress 'e' to edit • ↑↓ to navigate • ESC to go back")
+	}
+
+	messageStr := ""
+	if m.message != "" {
+		messageStr = "\n\n" + lipgloss.NewStyle().
+			Foreground(lipgloss.Color("226")).
+			Render(m.message)
+	}
+
+	return fmt.Sprintf("%s\n\n%s%s%s", header, strings.Join(rows, "\n"), instructions, messageStr)
+}
+
 // Update handleEnter to handle new menu options
 func (m model) handleEnter() (model, tea.Cmd) {
 	switch m.screen {
@@ -1216,6 +1673,8 @@ func (m model) getMaxCursor() int {
 	switch m.screen {
 	case screenMain:
 		return 4 // Updated to account for new menu options
+	case screenSettings:
+		return 4 // 5 settings items (0-4)
 	case screenGlobalBackups:
 		return len(m.globalBackups) - 1
 	case screenBackupClean:
@@ -1328,6 +1787,8 @@ func (m model) View() string {
 		return m.renderMain()
 	case screenBackupManagement:
 		return m.ViewOld() // Use the original backup management view
+	case screenSettings:
+		return m.renderSettings()
 	case screenGlobalBackups:
 		return m.renderGlobalBackups()
 	case screenBackupClean:
@@ -1415,7 +1876,14 @@ func (m model) ViewOld() string {
 
 	// Footer with commands
 	var footer string
-	if m.deleteMode {
+	if m.searchMode {
+		searchStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#3B82F6")).
+			Bold(true)
+
+		footer = searchStyle.Render("🔍 Search: "+m.textInput.View()) +
+			helpStyle.Render("\nPress Enter to search • ESC to cancel")
+	} else if m.deleteMode {
 		deleteStyle := lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#DC2626")).
 			Bold(true)
@@ -1450,11 +1918,21 @@ func (m model) ViewOld() string {
 			editStyle.Render("\ne: edit"),
 			editStyle.Render("n/a: add"),
 			editStyle.Render("p: pause/resume"),
+			systemStyle.Render("/: search"),
 			systemStyle.Render("d: delete"),
 			systemStyle.Render("r: refresh"),
 			systemStyle.Render("q: quit"),
 		}
 		footer = helpStyle.Render("Commands: " + strings.Join(commandsHelp[:3], " • ") + " • " + strings.Join(commandsHelp[3:], " • "))
+
+		// Add search filter indicator if active
+		if m.filteredJobs != nil && m.searchQuery != "" {
+			filterStyle := lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#3B82F6")).
+				Background(lipgloss.Color("#1E3A8A")).
+				Padding(0, 1)
+			footer = filterStyle.Render(fmt.Sprintf("🔍 Filtered by: '%s' (%d results)", m.searchQuery, len(m.filteredJobs))) + "\n" + footer
+		}
 	}
 
 	// Build the final view
@@ -1618,7 +2096,36 @@ func backupMySQL(dbName, destination, timestamp string) error {
 
 	os.MkdirAll(destination, 0755)
 
-	cmd := exec.Command("mysqldump", "-u", "root", "-p", dbName)
+	// Get MySQL credentials from environment
+	mysqlUser := os.Getenv("MYSQL_USER")
+	mysqlPassword := os.Getenv("MYSQL_PWD")
+	mysqlHost := os.Getenv("MYSQL_HOST")
+	mysqlPort := os.Getenv("MYSQL_PORT")
+
+	if mysqlUser == "" {
+		mysqlUser = "root"
+	}
+	if mysqlHost == "" {
+		mysqlHost = "localhost"
+	}
+	if mysqlPort == "" {
+		mysqlPort = "3306"
+	}
+
+	args := []string{
+		"-h", mysqlHost,
+		"-P", mysqlPort,
+		"-u", mysqlUser,
+	}
+
+	// Only add password flag if password is set
+	if mysqlPassword != "" {
+		args = append(args, fmt.Sprintf("-p%s", mysqlPassword))
+	}
+
+	args = append(args, dbName)
+
+	cmd := exec.Command("mysqldump", args...)
 
 	file, err := os.Create(fullPath)
 	if err != nil {
@@ -1962,4 +2469,77 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// verifyBackup performs basic integrity checks on backups
+func verifyBackup(backupType, path string) error {
+	switch backupType {
+	case "postgres", "mysql":
+		// For SQL backups, check if file exists and contains valid SQL
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("cannot read backup file: %v", err)
+		}
+		if len(data) == 0 {
+			return fmt.Errorf("backup file is empty")
+		}
+		// Basic SQL validation - check for common SQL keywords
+		content := string(data)
+		if !strings.Contains(content, "CREATE") && !strings.Contains(content, "INSERT") && !strings.Contains(content, "TABLE") {
+			return fmt.Errorf("backup file does not appear to contain valid SQL")
+		}
+		return nil
+
+	case "mongodb":
+		// For MongoDB, check if directory exists and contains BSON files
+		info, err := os.Stat(path)
+		if err != nil {
+			return fmt.Errorf("cannot access backup directory: %v", err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("backup path is not a directory")
+		}
+		// Check for BSON files
+		entries, err := os.ReadDir(path)
+		if err != nil {
+			return fmt.Errorf("cannot read backup directory: %v", err)
+		}
+		hasBSON := false
+		for _, entry := range entries {
+			if strings.HasSuffix(entry.Name(), ".bson") || strings.HasSuffix(entry.Name(), ".metadata.json") {
+				hasBSON = true
+				break
+			}
+		}
+		if !hasBSON {
+			return fmt.Errorf("backup directory does not contain BSON files")
+		}
+		return nil
+
+	case "directory":
+		// For tar.gz, verify archive integrity
+		cmd := exec.Command("tar", "-tzf", path)
+		cmd.Stdout = nil
+		cmd.Stderr = nil
+		err := cmd.Run()
+		if err != nil {
+			return fmt.Errorf("archive integrity check failed: %v", err)
+		}
+		return nil
+
+	case "file":
+		// For file backups, just check if file exists and is not empty
+		info, err := os.Stat(path)
+		if err != nil {
+			return fmt.Errorf("cannot access backup file: %v", err)
+		}
+		if info.Size() == 0 {
+			return fmt.Errorf("backup file is empty")
+		}
+		return nil
+
+	default:
+		// Unknown type, skip verification
+		return nil
+	}
 }
