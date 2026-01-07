@@ -15,10 +15,13 @@ A terminal-based backup management system built with Go and Bubble Tea. Create, 
 ## Installation
 
 ```bash
-make install
+go install github.com/LFroesch/backup-xd@latest
 ```
 
-This builds the binary and copies it to `~/.local/bin/backup-xd`.
+Make sure `$GOPATH/bin` (usually `~/go/bin`) is in your PATH:
+```bash
+export PATH="$HOME/go/bin:$PATH"
+```
 
 ## Configuration
 

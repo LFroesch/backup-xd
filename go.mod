@@ -1,4 +1,4 @@
-module backup-xd
+module github.com/LFroesch/backup-xd
 
 go 1.23.3
 
