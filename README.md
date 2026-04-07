@@ -1,81 +1,106 @@
-# backup-xd
+# Backup-xd
 
-A terminal-based backup management system built with Go and Bubble Tea. Create, schedule, and manage backups for databases, files, and directories with an intuitive TUI interface.
+TUI backup manager for databases and filesystems. Create, schedule, and manage backups with an interactive terminal interface. Built with Go and [Bubble Tea](https://github.com/charmbracelet/bubbletea).
 
-## Features
-
-- **Database Backups**: PostgreSQL, MySQL, MongoDB support
-- **File System Backups**: Individual files and directories  
-- **Backup Management**: View, edit, pause/resume, and delete backup jobs
-- **Global Backup View**: Browse all backups across different types
-- **Automated Cleanup**: Remove old backups based on retention policies
-- **Restore Operations**: Quick restore from latest backups
-- **Metadata Tracking**: Detailed backup information and statistics
-
-## Installation
+## Install
 
 ```bash
 go install github.com/LFroesch/backup-xd@latest
 ```
 
-Make sure `$GOPATH/bin` (usually `~/go/bin`) is in your PATH:
-```bash
-export PATH="$HOME/go/bin:$PATH"
-```
-
-## Configuration
-
-The application stores configuration in `~/.config/backup-xd/`:
-- `config.json` - Backup job definitions
-- `.backup-env` - Environment variables for database connections
-
-### Environment Variables
-
-Set database connection details in `~/.config/backup-xd/.backup-env`:
+Or build from source:
 
 ```bash
-# PostgreSQL
-export PGHOST=localhost
-export PGUSER=postgres  
-export PGPASSWORD=your_password
-export PGPORT=5432
-
-# MongoDB connection strings can be stored as environment variables
-export MONGO_URI=mongodb://user:pass@localhost:27017/dbname
+make install
 ```
 
 ## Usage
 
-Run `backup-xd` to open the interactive interface:
+```bash
+backup-xd
+```
 
-- **=� Backup Management**: Create, edit, and run backup jobs
-- **=� View All Backups**: Browse global backup history  
-- **>� Cleanup**: Remove old backups to free space
-- **�Settings**: Configure application preferences
+## Features
 
-### Backup Types
+- **Database backups** — PostgreSQL (pg_dump), MySQL (mysqldump), MongoDB (mongodump)
+- **Filesystem backups** — Individual files and compressed directory archives
+- **Scheduling** — Recurring intervals (1h, 24h, 7d) or one-off
+- **Job management** — Create, edit, pause/resume, delete backup jobs
+- **Global backup view** — Browse all backups across types
+- **Cleanup** — Remove old backups based on retention
+- **Restore** — Quick restore from latest backup
+- **Metadata tracking** — Timestamp, file size, duration saved with each backup
 
-- `postgres` - PostgreSQL database dumps
-- `mysql` - MySQL database dumps  
-- `mongodb` - MongoDB collections
-- `file` - Individual file backups
-- `directory` - Compressed directory archives
+## Keybindings
 
-### Schedule Options
+### Main Menu
+| Key | Action |
+|-----|--------|
+| `j/k`, `up/down` | Navigate |
+| `enter` | Select menu item |
+| `q` | Quit |
 
-- `1h`, `24h`, `7d` - Recurring intervals
-- `oneoff` - Single execution (marked completed after run)
+### Backup Management
+| Key | Action |
+|-----|--------|
+| `a` | Add new backup job |
+| `e` | Edit job |
+| `enter` | Run backup now |
+| `p` | Pause/resume job |
+| `d` | Delete job |
+| `esc` | Back to menu |
 
-## Backup Storage
+## Backup Types
 
-Backups are organized in `~/backups/backup-xd/` by type:
+| Type | Tool | Source |
+|------|------|--------|
+| `postgres` | `pg_dump` | Database name |
+| `mysql` | `mysqldump` | Database name |
+| `mongodb` | `mongodump` | Connection URI |
+| `file` | `cp` | File path |
+| `directory` | `tar` | Directory path |
+
+## Configuration
+
+### Config File
+`~/.config/backup-xd/config.json` — backup job definitions
+
+### Environment Variables
+Database connections read from `~/.config/backup-xd/.backup-env`:
+
+```bash
+# PostgreSQL
+export PGHOST=localhost
+export PGUSER=postgres
+export PGPASSWORD=your_password
+export PGPORT=5432
+
+# MongoDB
+export MONGO_URI=mongodb://user:pass@localhost:27017/dbname
+```
+
+### Backup Storage
+
 ```
 ~/backups/backup-xd/
-postgres/
-mysql/
-mongodb/
-files/
-directories/
+├── postgres/
+├── mysql/
+├── mongodb/
+├── files/
+└── directories/
 ```
 
-Each backup includes metadata.json with timestamp, size, and job details.
+Each backup includes a `metadata.json` with timestamp, size, duration, and job details.
+
+## Schedule Options
+
+| Schedule | Behavior |
+|----------|----------|
+| `1h` | Every hour |
+| `24h` | Daily |
+| `7d` | Weekly |
+| `oneoff` | Run once, then mark completed |
+
+## License
+
+[AGPL-3.0](LICENSE)
