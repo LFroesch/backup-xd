@@ -50,6 +50,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		if msg.String() == "ctrl+c" {
+			return m, tea.Quit
+		}
+		if m.showHelp {
+			if msg.String() == "?" || msg.String() == "q" || msg.String() == "esc" {
+				m.showHelp = false
+			}
+			return m, nil
+		}
 		if m.editMode {
 			return m.updateEdit(msg)
 		}
@@ -122,7 +131,15 @@ func (m model) updateEdit(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "q", "ctrl+c":
+	case "?":
+		m.showHelp = true
+		return m, nil
+	case "q":
+		if m.screen != screenMain {
+			m.screen = screenMain
+			m.cursor = 0
+			return m, nil
+		}
 		return m, tea.Quit
 	case "up", "k":
 		if m.globalDeleteMode {

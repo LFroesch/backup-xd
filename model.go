@@ -91,6 +91,7 @@ type model struct {
 	statusMsg    string
 	statusExpiry time.Time
 	lastUpdate   time.Time
+	showHelp     bool
 }
 
 // --- Messages ---

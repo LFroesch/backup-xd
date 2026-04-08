@@ -9,6 +9,9 @@ import (
 )
 
 func (m model) View() string {
+	if m.showHelp {
+		return m.renderHelp()
+	}
 	switch m.screen {
 	case screenMain:
 		return m.renderMain()
@@ -21,6 +24,41 @@ func (m model) View() string {
 	default:
 		return "Screen not implemented yet"
 	}
+}
+
+func (m model) renderHelp() string {
+	helpStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(colorPrimary).
+		Padding(1, 2).
+		Width(m.width - 4)
+
+	keys := []struct{ key, desc string }{
+		{"j/k, ↑/↓", "Navigate"},
+		{"enter", "Select / run backup"},
+		{"e", "Edit selected job"},
+		{"a", "Add new job"},
+		{"delete", "Delete selected job"},
+		{"esc/q", "Back / quit"},
+		{"?", "Toggle this help"},
+		{"ctrl+c", "Quit immediately"},
+	}
+
+	var lines []string
+	lines = append(lines, titleStyle.Render("backup-xd — Help"))
+	lines = append(lines, "")
+	for _, k := range keys {
+		lines = append(lines, fmt.Sprintf("  %s  %s",
+			keyStyle.Render(fmt.Sprintf("%-16s", k.key)),
+			k.desc,
+		))
+	}
+	lines = append(lines, "")
+	lines = append(lines, dimTextStyle.Render("Press ?, q, or esc to close"))
+
+	return lipgloss.Place(m.width, m.height,
+		lipgloss.Center, lipgloss.Center,
+		helpStyle.Render(strings.Join(lines, "\n")))
 }
 
 func (m model) renderMain() string {
