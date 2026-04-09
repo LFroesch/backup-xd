@@ -31,18 +31,6 @@ Command:
 ```bash
 backup-xd
 ```
-## Install
-
-```bash
-go install github.com/LFroesch/backup-xd@latest
-```
-
-Or build from source:
-
-```bash
-make install
-```
-
 ## Usage
 
 ```bash
