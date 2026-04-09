@@ -363,10 +363,8 @@ func (m model) performCleanup() (model, tea.Cmd) {
 
 func (m model) runBackup(jobID int) tea.Cmd {
 	return func() tea.Msg {
-		for i, job := range m.jobs {
+		for _, job := range m.jobs {
 			if job.ID == jobID {
-				m.jobs[i].Status = "running"
-
 				startTime := time.Now()
 				timestamp := startTime.Format("2006-01-02_15-04-05")
 				var err error
@@ -654,7 +652,20 @@ func backupMySQL(dbName, destination, timestamp string) error {
 	fullPath := filepath.Join(destination, filename)
 	os.MkdirAll(destination, 0755)
 
-	cmd := exec.Command("mysqldump", "-u", "root", "-p", dbName)
+	mysqlHost := os.Getenv("MYSQL_HOST")
+	mysqlUser := os.Getenv("MYSQL_USER")
+	mysqlPassword := os.Getenv("MYSQL_PASSWORD")
+	mysqlPort := os.Getenv("MYSQL_PORT")
+	if mysqlHost == "" { mysqlHost = "localhost" }
+	if mysqlUser == "" { mysqlUser = "root" }
+	if mysqlPort == "" { mysqlPort = "3306" }
+
+	args := []string{"-h", mysqlHost, "-u", mysqlUser, "-P", mysqlPort}
+	if mysqlPassword != "" {
+		args = append(args, fmt.Sprintf("-p%s", mysqlPassword))
+	}
+	args = append(args, dbName)
+	cmd := exec.Command("mysqldump", args...)
 	file, err := os.Create(fullPath)
 	if err != nil {
 		return err

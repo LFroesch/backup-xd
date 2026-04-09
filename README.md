@@ -91,6 +91,12 @@ export PGUSER=postgres
 export PGPASSWORD=your_password
 export PGPORT=5432
 
+# MySQL
+export MYSQL_HOST=localhost
+export MYSQL_USER=root
+export MYSQL_PASSWORD=your_password
+export MYSQL_PORT=3306
+
 # MongoDB
 export MONGO_URI=mongodb://user:pass@localhost:27017/dbname
 ```
