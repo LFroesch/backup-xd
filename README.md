@@ -2,6 +2,33 @@
 
 TUI backup manager for databases and filesystems. Create, schedule, and manage backups with an interactive terminal interface. Built with Go and [Bubble Tea](https://github.com/charmbracelet/bubbletea).
 
+## Quick Install
+
+Recommended (installs to `~/.local/bin`):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/LFroesch/backup-xd/main/install.sh | bash
+```
+
+Or download a binary from [GitHub Releases](https://github.com/LFroesch/backup-xd/releases).
+
+Or install with Go:
+
+```bash
+go install github.com/LFroesch/backup-xd@latest
+```
+
+Or build from source:
+
+```bash
+make install
+```
+
+Command:
+
+```bash
+backup-xd
+```
 ## Install
 
 ```bash

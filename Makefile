@@ -1,7 +1,12 @@
+BIN := backup-xd
+BUILD_TARGET := .
+INSTALL_DIR ?= $(HOME)/.local/bin
+
 build:
-	go build -o backup-xd main.go
+	go build -o $(BIN) $(BUILD_TARGET)
 
-cp:
-	cp backup-xd ~/.local/bin/
+install: build
+	mkdir -p $(INSTALL_DIR)
+	install -m 0755 $(BIN) $(INSTALL_DIR)/$(BIN)
 
-install: build cp
+.PHONY: build install
