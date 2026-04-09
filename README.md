@@ -31,11 +31,6 @@ Command:
 ```bash
 backup-xd
 ```
-## Usage
-
-```bash
-backup-xd
-```
 
 ## Features
 
@@ -51,6 +46,7 @@ backup-xd
 ## Keybindings
 
 ### Main Menu
+
 | Key | Action |
 |-----|--------|
 | `j/k`, `up/down` | Navigate |
@@ -58,6 +54,7 @@ backup-xd
 | `q` | Quit |
 
 ### Backup Management
+
 | Key | Action |
 |-----|--------|
 | `a` | Add new backup job |
@@ -80,9 +77,11 @@ backup-xd
 ## Configuration
 
 ### Config File
+
 `~/.config/backup-xd/config.json` — backup job definitions
 
 ### Environment Variables
+
 Database connections read from `~/.config/backup-xd/.backup-env`:
 
 ```bash
