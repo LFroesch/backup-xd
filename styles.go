@@ -34,10 +34,6 @@ var (
 			Foreground(colorError).
 			Bold(true)
 
-	successTextStyle = lipgloss.NewStyle().
-				Foreground(colorPrimary).
-				Bold(true)
-
 	warnTextStyle = lipgloss.NewStyle().
 			Foreground(colorWarn).
 			Bold(true)

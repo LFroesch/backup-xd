@@ -86,11 +86,16 @@ func loadBackupConfig(configFile string) BackupConfig {
 		return config
 	}
 
-	json.Unmarshal(data, &config)
+	if err := json.Unmarshal(data, &config); err != nil {
+		log.Printf("Warning: could not parse config: %v", err)
+	}
 	return config
 }
 
 func saveConfig(config BackupConfig, configFile string) error {
+	if err := os.MkdirAll(filepath.Dir(configFile), 0755); err != nil {
+		return err
+	}
 	data, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
 		return err
@@ -132,10 +137,7 @@ func (m *model) updateTable() {
 }
 
 func (m *model) adjustLayout() {
-	tableHeight := m.height - 6
-	if tableHeight < 5 {
-		tableHeight = 5
-	}
+	tableHeight := max(m.height-6, 5)
 
 	availableWidth := m.width - 10
 	idWidth := 4
@@ -334,7 +336,14 @@ func (m model) performCleanup() (model, tea.Cmd) {
 	backupBaseDir := getBackupBaseDir()
 
 	for _, backup := range m.cleanupPreview {
-		backupPath := filepath.Join(backupBaseDir, "backup-xd", backup.BackupType, backup.BackupFile)
+		dirName := backup.BackupType
+		switch backup.BackupType {
+		case "file":
+			dirName = "files"
+		case "directory":
+			dirName = "directories"
+		}
+		backupPath := filepath.Join(backupBaseDir, "backup-xd", dirName, backup.BackupFile)
 
 		if err := os.RemoveAll(backupPath); err != nil {
 			errors = append(errors, fmt.Sprintf("Failed to delete %s: %v", backup.JobName, err))
@@ -376,8 +385,7 @@ func (m model) runBackup(jobID int) tea.Cmd {
 					_, err = backupMySQLWithMetadata(job, timestamp, startTime)
 				case "mongodb":
 					connectionString := job.Source
-					if strings.HasPrefix(connectionString, "$") {
-						envVar := strings.TrimPrefix(connectionString, "$")
+					if envVar, ok := strings.CutPrefix(connectionString, "$"); ok {
 						connectionString = os.Getenv(envVar)
 						if connectionString == "" {
 							err = fmt.Errorf("environment variable %s not set", envVar)
@@ -436,8 +444,7 @@ func (m model) showRestoreOptions(job BackupJob) tea.Cmd {
 		latestBackup := backupFiles[len(backupFiles)-1]
 
 		connectionString := job.Source
-		if strings.HasPrefix(connectionString, "$") {
-			envVar := strings.TrimPrefix(connectionString, "$")
+		if envVar, ok := strings.CutPrefix(connectionString, "$"); ok {
 			connectionString = os.Getenv(envVar)
 			if connectionString == "" {
 				return statusMsg{message: fmt.Sprintf("Environment variable %s not set", envVar)}
@@ -903,13 +910,6 @@ func truncate(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen-3] + "..."
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }
 
 // --- Table styling ---
