@@ -19,25 +19,31 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		m.lastUpdate = time.Time(msg)
-		return m, tickCmd()
+		var changed bool
+		m.jobs, changed = normalizeJobsScheduleState(m.jobs, m.lastUpdate)
+		if changed {
+			m.persistJobs()
+		}
+		m, scheduleCmd := m.startDueScheduledJobs(m.lastUpdate)
+		return m, tea.Batch(tickCmd(), scheduleCmd)
 
 	case backupCompleteMsg:
 		for i, job := range m.jobs {
 			if job.ID == msg.jobID {
-				m.jobs[i].LastRun = time.Now()
+				m.jobs[i].LastRun = msg.completedAt
 				if strings.ToLower(job.Schedule) == "oneoff" {
 					m.jobs[i].Status = "completed"
+					m.jobs[i].NextRun = time.Time{}
 				} else {
 					m.jobs[i].Status = "active"
+					m.jobs[i].NextRun = nextRunForJob(m.jobs[i], msg.completedAt)
 				}
 				if msg.success {
 					m.jobs[i].LastResult = "Success"
 				} else {
 					m.jobs[i].LastResult = "Error"
 				}
-				m.config.Jobs = m.jobs
-				saveConfig(m.config, m.configFile)
-				m.updateTable()
+				m.persistJobs()
 				break
 			}
 		}
@@ -171,8 +177,7 @@ func (m model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		if m.screen == screenBackupManagement {
 			if len(m.jobs) > 0 {
-				job := m.jobs[m.table.Cursor()]
-				return m, m.runBackup(job.ID)
+				return m.startJobRun(m.table.Cursor(), "Manual run started")
 			}
 			return m, nil
 		}
@@ -250,7 +255,7 @@ func (m model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				ID:          m.config.NextID,
 				Name:        "New Backup Job",
 				Source:      "/path/to/source",
-				Destination: "./backups/",
+				Destination: "",
 				Type:        "file",
 				Schedule:    "oneoff",
 				Status:      "active",
@@ -276,8 +281,7 @@ func (m model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case " ":
 		if m.screen == screenBackupManagement && len(m.jobs) > 0 {
-			job := m.jobs[m.table.Cursor()]
-			return m, m.runBackup(job.ID)
+			return m.startJobRun(m.table.Cursor(), "Manual run started")
 		}
 		return m, nil
 	case "ctrl+r":
@@ -302,17 +306,23 @@ func (m model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, showStatus("Cannot resume completed OneOff job")
 			}
 
+			if currentStatus == "running" {
+				return m, showStatus("Cannot pause a running job")
+			}
+
 			if currentStatus == "active" {
 				m.jobs[idx].Status = "paused"
 			} else if currentStatus == "paused" {
 				m.jobs[idx].Status = "active"
+				if m.jobs[idx].NextRun.IsZero() {
+					m.jobs[idx].NextRun = nextRunForJob(m.jobs[idx], time.Now())
+				}
 			} else if currentStatus == "completed" {
 				m.jobs[idx].Status = "active"
+				m.jobs[idx].NextRun = nextRunForJob(m.jobs[idx], time.Now())
 			}
 
-			m.config.Jobs = m.jobs
-			saveConfig(m.config, m.configFile)
-			m.updateTable()
+			m.persistJobs()
 			return m, showStatus(fmt.Sprintf("Job %s", m.jobs[idx].Status))
 		}
 		return m, nil
@@ -340,8 +350,6 @@ func (m model) handleEnter() (model, tea.Cmd) {
 			m.screen = screenBackupClean
 			m.cleanupPreview = getOldBackups(m.cleanupDays)
 		case 3:
-			m.screen = screenSettings
-		case 4:
 			return m, tea.Quit
 		}
 		m.cursor = 0
@@ -353,7 +361,7 @@ func (m model) handleEnter() (model, tea.Cmd) {
 func (m model) getMaxCursor() int {
 	switch m.screen {
 	case screenMain:
-		return 4
+		return 3
 	case screenGlobalBackups:
 		return len(m.globalBackups) - 1
 	case screenBackupClean:

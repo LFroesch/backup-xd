@@ -112,6 +112,232 @@ func getBackupBaseDir() string {
 	return filepath.Join(homeDir, "backups")
 }
 
+func backupTypeDir(backupType string) string {
+	switch backupType {
+	case "file":
+		return "files"
+	case "directory":
+		return "directories"
+	default:
+		return backupType
+	}
+}
+
+func sanitizePathSegment(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "unnamed"
+	}
+	replacer := strings.NewReplacer(
+		"/", "_",
+		"\\", "_",
+		":", "_",
+		" ", "_",
+	)
+	value = replacer.Replace(value)
+	value = strings.Trim(value, "._-")
+	if value == "" {
+		return "unnamed"
+	}
+	return value
+}
+
+func storageKeyForJob(job BackupJob) string {
+	switch job.Type {
+	case "postgres", "mysql":
+		return sanitizePathSegment(job.Source)
+	case "mongodb":
+		source := strings.TrimSpace(job.Source)
+		if source == "" {
+			return sanitizePathSegment(job.Name)
+		}
+		if envVar, ok := strings.CutPrefix(source, "$"); ok {
+			return sanitizePathSegment(envVar)
+		}
+		return sanitizePathSegment(filepath.Base(source))
+	case "file", "directory":
+		expandedSource := expandPath(job.Source)
+		base := filepath.Base(expandedSource)
+		if base == "." || base == string(filepath.Separator) || base == "" {
+			return sanitizePathSegment(job.Name)
+		}
+		return sanitizePathSegment(base)
+	default:
+		return sanitizePathSegment(job.Name)
+	}
+}
+
+func defaultDestinationForJob(job BackupJob) string {
+	return filepath.Join(backupTypeRoot(job.Type), storageKeyForJob(job))
+}
+
+func backupTypeRoot(backupType string) string {
+	return filepath.Join(getBackupBaseDir(), "backup-xd", backupTypeDir(backupType))
+}
+
+func resolveDestinationForJob(job BackupJob) string {
+	destination := strings.TrimSpace(job.Destination)
+	typeRoot := backupTypeRoot(job.Type)
+	defaultDestination := defaultDestinationForJob(job)
+	if destination == "" {
+		return defaultDestination
+	}
+
+	expanded := expandPath(destination)
+	cleaned := filepath.Clean(expanded)
+	if cleaned == filepath.Join(getBackupBaseDir(), "backup-xd") || cleaned == typeRoot {
+		return defaultDestination
+	}
+	if strings.HasPrefix(cleaned, typeRoot+string(os.PathSeparator)) {
+		return cleaned
+	}
+	return defaultDestination
+}
+
+func metadataPathsUnder(root string) []string {
+	var paths []string
+
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() {
+			return nil
+		}
+		if info.Name() == "metadata.json" {
+			paths = append(paths, path)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil
+	}
+
+	sort.Strings(paths)
+	return paths
+}
+
+func parseScheduleInterval(schedule string) (time.Duration, bool) {
+	switch strings.ToLower(strings.TrimSpace(schedule)) {
+	case "1h":
+		return time.Hour, true
+	case "24h":
+		return 24 * time.Hour, true
+	case "7d":
+		return 7 * 24 * time.Hour, true
+	default:
+		return 0, false
+	}
+}
+
+func nextRunForJob(job BackupJob, from time.Time) time.Time {
+	if interval, ok := parseScheduleInterval(job.Schedule); ok {
+		return from.Add(interval)
+	}
+	return time.Time{}
+}
+
+func normalizeJobsScheduleState(jobs []BackupJob, now time.Time) ([]BackupJob, bool) {
+	changed := false
+
+	for i := range jobs {
+		schedule := strings.ToLower(strings.TrimSpace(jobs[i].Schedule))
+		if schedule == "oneoff" {
+			if jobs[i].Status != "completed" && !jobs[i].NextRun.IsZero() {
+				jobs[i].NextRun = time.Time{}
+				changed = true
+			}
+			continue
+		}
+
+		if _, ok := parseScheduleInterval(schedule); !ok {
+			if !jobs[i].NextRun.IsZero() {
+				jobs[i].NextRun = time.Time{}
+				changed = true
+			}
+			continue
+		}
+
+		if jobs[i].Status == "paused" || jobs[i].Status == "completed" {
+			continue
+		}
+
+		if jobs[i].NextRun.IsZero() {
+			base := now
+			if !jobs[i].LastRun.IsZero() {
+				base = jobs[i].LastRun
+			}
+			jobs[i].NextRun = nextRunForJob(jobs[i], base)
+			changed = true
+		}
+	}
+
+	return jobs, changed
+}
+
+func (m *model) persistJobs() {
+	m.config.Jobs = m.jobs
+	saveConfig(m.config, m.configFile)
+	m.updateTable()
+}
+
+func (m model) canStartJob(idx int) (bool, string) {
+	if idx < 0 || idx >= len(m.jobs) {
+		return false, "Job not found"
+	}
+
+	job := m.jobs[idx]
+	if job.Status == "paused" || job.Status == "running" {
+		return false, fmt.Sprintf("Job is %s", job.Status)
+	}
+	if job.Status == "completed" && strings.ToLower(job.Schedule) == "oneoff" {
+		return false, "One-off job already completed"
+	}
+	return true, ""
+}
+
+func (m model) startJobRun(idx int, reason string) (model, tea.Cmd) {
+	ok, blockedReason := m.canStartJob(idx)
+	if !ok {
+		return m, showStatus(blockedReason)
+	}
+
+	job := m.jobs[idx]
+	m.jobs[idx].Status = "running"
+	m.jobs[idx].LastResult = reason
+	m.persistJobs()
+
+	return m, m.runBackup(job.ID)
+}
+
+func (m model) startDueScheduledJobs(now time.Time) (model, tea.Cmd) {
+	var cmds []tea.Cmd
+	var started []string
+
+	for i := range m.jobs {
+		job := m.jobs[i]
+		if job.Status != "active" {
+			continue
+		}
+		if strings.ToLower(job.Schedule) == "oneoff" || job.NextRun.IsZero() || job.NextRun.After(now) {
+			continue
+		}
+
+		m.jobs[i].Status = "running"
+		m.jobs[i].LastResult = fmt.Sprintf("Scheduled run due %s", job.NextRun.Format("2006-01-02 15:04"))
+		cmds = append(cmds, m.runBackup(job.ID))
+		started = append(started, job.Name)
+	}
+
+	if len(cmds) == 0 {
+		return m, nil
+	}
+
+	m.persistJobs()
+	cmds = append(cmds, showStatus(fmt.Sprintf("Started scheduled backup: %s", strings.Join(started, ", "))))
+	return m, tea.Batch(cmds...)
+}
+
 // --- Table management ---
 
 func (m *model) updateTable() {
@@ -228,24 +454,13 @@ func (m *model) cancelEdit() {
 // --- Global backup scanning ---
 
 func scanGlobalBackups() []BackupMetadata {
-	backupBaseDir := getBackupBaseDir()
 	var allBackups []BackupMetadata
 
 	backupTypes := []string{"postgres", "mysql", "mongodb", "files", "directories"}
 
 	for _, backupType := range backupTypes {
-		typeDir := filepath.Join(backupBaseDir, "backup-xd", backupType)
-
-		entries, err := os.ReadDir(typeDir)
-		if err != nil {
-			continue
-		}
-
-		for _, entry := range entries {
-			if !entry.IsDir() {
-				continue
-			}
-			metadataPath := filepath.Join(typeDir, entry.Name(), "metadata.json")
+		typeDir := filepath.Join(getBackupBaseDir(), "backup-xd", backupType)
+		for _, metadataPath := range metadataPathsUnder(typeDir) {
 			if metadata, err := loadBackupMetadata(metadataPath); err == nil {
 				allBackups = append(allBackups, metadata)
 			}
@@ -298,15 +513,7 @@ func (m model) performGlobalBackupDelete() (model, tea.Cmd) {
 		backup := m.globalBackups[m.globalDeleteTargetIdx]
 		backupBaseDir := getBackupBaseDir()
 
-		dirName := backup.BackupType
-		switch backup.BackupType {
-		case "file":
-			dirName = "files"
-		case "directory":
-			dirName = "directories"
-		}
-
-		backupPath := filepath.Join(backupBaseDir, "backup-xd", dirName, backup.BackupFile)
+		backupPath := filepath.Join(backupBaseDir, "backup-xd", backupTypeDir(backup.BackupType), backup.BackupFile)
 
 		if err := os.RemoveAll(backupPath); err != nil {
 			m.message = fmt.Sprintf("Failed to delete backup: %v", err)
@@ -336,14 +543,7 @@ func (m model) performCleanup() (model, tea.Cmd) {
 	backupBaseDir := getBackupBaseDir()
 
 	for _, backup := range m.cleanupPreview {
-		dirName := backup.BackupType
-		switch backup.BackupType {
-		case "file":
-			dirName = "files"
-		case "directory":
-			dirName = "directories"
-		}
-		backupPath := filepath.Join(backupBaseDir, "backup-xd", dirName, backup.BackupFile)
+		backupPath := filepath.Join(backupBaseDir, "backup-xd", backupTypeDir(backup.BackupType), backup.BackupFile)
 
 		if err := os.RemoveAll(backupPath); err != nil {
 			errors = append(errors, fmt.Sprintf("Failed to delete %s: %v", backup.JobName, err))
@@ -403,9 +603,10 @@ func (m model) runBackup(jobID int) tea.Cmd {
 
 				if err != nil {
 					return backupCompleteMsg{
-						jobID:   jobID,
-						success: false,
-						message: fmt.Sprintf("Backup failed: %v", err),
+						jobID:       jobID,
+						success:     false,
+						message:     fmt.Sprintf("Backup failed: %v", err),
+						completedAt: time.Now(),
 					}
 				}
 
@@ -415,17 +616,19 @@ func (m model) runBackup(jobID int) tea.Cmd {
 				}
 
 				return backupCompleteMsg{
-					jobID:   jobID,
-					success: true,
-					message: successMsg,
+					jobID:       jobID,
+					success:     true,
+					message:     successMsg,
+					completedAt: time.Now(),
 				}
 			}
 		}
 
 		return backupCompleteMsg{
-			jobID:   jobID,
-			success: false,
-			message: "Job not found",
+			jobID:       jobID,
+			success:     false,
+			message:     "Job not found",
+			completedAt: time.Now(),
 		}
 	}
 }
@@ -475,105 +678,85 @@ func (m model) showRestoreOptions(job BackupJob) tea.Cmd {
 
 func findBackupsForJob(job BackupJob) ([]string, error) {
 	var backupFiles []string
-
-	backupBaseDir := getBackupBaseDir()
-	var expandedDestination string
-
-	if strings.HasPrefix(job.Destination, backupBaseDir) {
-		expandedDestination = job.Destination
-	} else {
-		switch job.Type {
-		case "postgres":
-			expandedDestination = filepath.Join(backupBaseDir, "backup-xd", "postgres")
-		case "mysql":
-			expandedDestination = filepath.Join(backupBaseDir, "backup-xd", "mysql")
-		case "mongodb":
-			expandedDestination = filepath.Join(backupBaseDir, "backup-xd", "mongodb")
-		case "file":
-			expandedDestination = filepath.Join(backupBaseDir, "backup-xd", "files")
-		case "directory":
-			expandedDestination = filepath.Join(backupBaseDir, "backup-xd", "directories")
-		default:
-			expandedDestination = expandPath(job.Destination)
-		}
-	}
+	typeRoot := backupTypeRoot(job.Type)
+	metadataPaths := metadataPathsUnder(typeRoot)
 
 	switch job.Type {
 	case "postgres", "mysql":
-		entries, err := os.ReadDir(expandedDestination)
-		if err != nil {
-			return nil, err
-		}
-		for _, entry := range entries {
-			if entry.IsDir() && strings.HasPrefix(entry.Name(), strings.ReplaceAll(job.Name, " ", "_")+"_") {
-				sqlFile := filepath.Join(expandedDestination, entry.Name(), job.Source+".sql")
-				if _, err := os.Stat(sqlFile); err == nil {
-					backupFiles = append(backupFiles, sqlFile)
-				}
+		for _, metadataPath := range metadataPaths {
+			metadata, err := loadBackupMetadata(metadataPath)
+			if err != nil || metadata.JobID != job.ID {
+				continue
+			}
+			backupDir := filepath.Join(typeRoot, metadata.BackupFile)
+			if metadata.BackupFile == "" {
+				backupDir = filepath.Dir(metadataPath)
+			}
+			sqlFile := filepath.Join(backupDir, job.Source+".sql")
+			if _, err := os.Stat(sqlFile); err == nil {
+				backupFiles = append(backupFiles, sqlFile)
 			}
 		}
 
 	case "mongodb":
-		entries, err := os.ReadDir(expandedDestination)
-		if err != nil {
-			return nil, err
-		}
-		for _, entry := range entries {
-			if entry.IsDir() && strings.HasPrefix(entry.Name(), strings.ReplaceAll(job.Name, " ", "_")+"_") {
-				backupFiles = append(backupFiles, filepath.Join(expandedDestination, entry.Name()))
+		for _, metadataPath := range metadataPaths {
+			metadata, err := loadBackupMetadata(metadataPath)
+			if err != nil || metadata.JobID != job.ID {
+				continue
 			}
+			backupDir := filepath.Join(typeRoot, metadata.BackupFile)
+			if metadata.BackupFile == "" {
+				backupDir = filepath.Dir(metadataPath)
+			}
+			backupFiles = append(backupFiles, backupDir)
 		}
 
 	case "file":
-		entries, err := os.ReadDir(expandedDestination)
-		if err != nil {
-			return nil, err
-		}
 		expandedSource := expandPath(job.Source)
 		baseName := filepath.Base(expandedSource)
-		for _, entry := range entries {
-			if entry.IsDir() && strings.HasPrefix(entry.Name(), strings.ReplaceAll(job.Name, " ", "_")+"_") {
-				backupFile := filepath.Join(expandedDestination, entry.Name(), baseName)
-				if _, err := os.Stat(backupFile); err == nil {
-					backupFiles = append(backupFiles, backupFile)
-				}
+		for _, metadataPath := range metadataPaths {
+			metadata, err := loadBackupMetadata(metadataPath)
+			if err != nil || metadata.JobID != job.ID {
+				continue
+			}
+			backupDir := filepath.Join(typeRoot, metadata.BackupFile)
+			if metadata.BackupFile == "" {
+				backupDir = filepath.Dir(metadataPath)
+			}
+			backupFile := filepath.Join(backupDir, baseName)
+			if _, err := os.Stat(backupFile); err == nil {
+				backupFiles = append(backupFiles, backupFile)
 			}
 		}
 
 	case "directory":
-		entries, err := os.ReadDir(expandedDestination)
-		if err != nil {
-			return nil, err
-		}
 		expandedSource := expandPath(job.Source)
 		baseName := filepath.Base(expandedSource)
-		for _, entry := range entries {
-			if entry.IsDir() && strings.HasPrefix(entry.Name(), strings.ReplaceAll(job.Name, " ", "_")+"_") {
-				tarFile := filepath.Join(expandedDestination, entry.Name(), baseName+".tar.gz")
-				if _, err := os.Stat(tarFile); err == nil {
-					backupFiles = append(backupFiles, tarFile)
-				}
+		for _, metadataPath := range metadataPaths {
+			metadata, err := loadBackupMetadata(metadataPath)
+			if err != nil || metadata.JobID != job.ID {
+				continue
+			}
+			backupDir := filepath.Join(typeRoot, metadata.BackupFile)
+			if metadata.BackupFile == "" {
+				backupDir = filepath.Dir(metadataPath)
+			}
+			tarFile := filepath.Join(backupDir, baseName+".tar.gz")
+			if _, err := os.Stat(tarFile); err == nil {
+				backupFiles = append(backupFiles, tarFile)
 			}
 		}
 	}
 
+	sort.Strings(backupFiles)
 	return backupFiles, nil
 }
 
 // --- Backup providers ---
 
 func backupPostgresWithMetadata(job BackupJob, timestamp string, startTime time.Time) (string, error) {
-	backupBaseDir := getBackupBaseDir()
-	backupDir := filepath.Join(backupBaseDir, "backup-xd", "postgres")
-	var expandedDestination string
-	if strings.HasPrefix(job.Destination, backupBaseDir) {
-		expandedDestination = job.Destination
-	} else {
-		expandedDestination = backupDir
-	}
-
-	folderName := fmt.Sprintf("%s_%s", strings.ReplaceAll(job.Name, " ", "_"), timestamp)
-	folderPath := filepath.Join(expandedDestination, folderName)
+	expandedDestination := resolveDestinationForJob(job)
+	folderPath := filepath.Join(expandedDestination, timestamp)
 	filename := fmt.Sprintf("%s.sql", job.Source)
 	fullPath := filepath.Join(folderPath, filename)
 
@@ -589,9 +772,9 @@ func backupPostgresWithMetadata(job BackupJob, timestamp string, startTime time.
 
 	metadata := BackupMetadata{
 		JobID: job.ID, JobName: job.Name, BackupType: job.Type, Source: job.Source,
-		BackupFile: folderName, Timestamp: startTime,
+		BackupFile: filepath.Join(storageKeyForJob(job), timestamp), Timestamp: startTime,
 		HumanTime: startTime.Format("January 2, 2006 at 3:04 PM"),
-		FileSize: fileSize, FileSizeStr: formatFileSize(fileSize),
+		FileSize:  fileSize, FileSizeStr: formatFileSize(fileSize),
 		Duration: duration.String(), Status: "completed",
 	}
 	saveBackupMetadata(metadata, filepath.Join(folderPath, "metadata.json"))
@@ -607,10 +790,18 @@ func backupPostgres(dbName, destination, timestamp string) error {
 	pgUser := os.Getenv("PGUSER")
 	pgPassword := os.Getenv("PGPASSWORD")
 	pgPort := os.Getenv("PGPORT")
-	if pgHost == "" { pgHost = "localhost" }
-	if pgUser == "" { pgUser = "postgres" }
-	if pgPassword == "" { pgPassword = "postgres" }
-	if pgPort == "" { pgPort = "5432" }
+	if pgHost == "" {
+		pgHost = "localhost"
+	}
+	if pgUser == "" {
+		pgUser = "postgres"
+	}
+	if pgPassword == "" {
+		pgPassword = "postgres"
+	}
+	if pgPort == "" {
+		pgPort = "5432"
+	}
 
 	cmd := exec.Command("pg_dump", "-h", pgHost, "-U", pgUser, "-p", pgPort, "-d", dbName, "-f", fullPath)
 	cmd.Env = append(os.Environ(), "PGPASSWORD="+pgPassword)
@@ -619,17 +810,8 @@ func backupPostgres(dbName, destination, timestamp string) error {
 }
 
 func backupMySQLWithMetadata(job BackupJob, timestamp string, startTime time.Time) (string, error) {
-	backupBaseDir := getBackupBaseDir()
-	backupDir := filepath.Join(backupBaseDir, "backup-xd", "mysql")
-	var expandedDestination string
-	if strings.HasPrefix(job.Destination, backupBaseDir) {
-		expandedDestination = job.Destination
-	} else {
-		expandedDestination = backupDir
-	}
-
-	folderName := fmt.Sprintf("%s_%s", strings.ReplaceAll(job.Name, " ", "_"), timestamp)
-	folderPath := filepath.Join(expandedDestination, folderName)
+	expandedDestination := resolveDestinationForJob(job)
+	folderPath := filepath.Join(expandedDestination, timestamp)
 	filename := fmt.Sprintf("%s.sql", job.Source)
 	fullPath := filepath.Join(folderPath, filename)
 
@@ -645,9 +827,9 @@ func backupMySQLWithMetadata(job BackupJob, timestamp string, startTime time.Tim
 
 	metadata := BackupMetadata{
 		JobID: job.ID, JobName: job.Name, BackupType: job.Type, Source: job.Source,
-		BackupFile: folderName, Timestamp: startTime,
+		BackupFile: filepath.Join(storageKeyForJob(job), timestamp), Timestamp: startTime,
 		HumanTime: startTime.Format("January 2, 2006 at 3:04 PM"),
-		FileSize: fileSize, FileSizeStr: formatFileSize(fileSize),
+		FileSize:  fileSize, FileSizeStr: formatFileSize(fileSize),
 		Duration: duration.String(), Status: "completed",
 	}
 	saveBackupMetadata(metadata, filepath.Join(folderPath, "metadata.json"))
@@ -663,9 +845,15 @@ func backupMySQL(dbName, destination, timestamp string) error {
 	mysqlUser := os.Getenv("MYSQL_USER")
 	mysqlPassword := os.Getenv("MYSQL_PASSWORD")
 	mysqlPort := os.Getenv("MYSQL_PORT")
-	if mysqlHost == "" { mysqlHost = "localhost" }
-	if mysqlUser == "" { mysqlUser = "root" }
-	if mysqlPort == "" { mysqlPort = "3306" }
+	if mysqlHost == "" {
+		mysqlHost = "localhost"
+	}
+	if mysqlUser == "" {
+		mysqlUser = "root"
+	}
+	if mysqlPort == "" {
+		mysqlPort = "3306"
+	}
 
 	args := []string{"-h", mysqlHost, "-u", mysqlUser, "-P", mysqlPort}
 	if mysqlPassword != "" {
@@ -684,19 +872,10 @@ func backupMySQL(dbName, destination, timestamp string) error {
 }
 
 func backupMongoDBWithMetadata(job BackupJob, connectionString, timestamp string, startTime time.Time) (string, error) {
-	backupBaseDir := getBackupBaseDir()
-	backupDir := filepath.Join(backupBaseDir, "backup-xd", "mongodb")
-	var expandedDestination string
-	if strings.HasPrefix(job.Destination, backupBaseDir) {
-		expandedDestination = job.Destination
-	} else {
-		expandedDestination = backupDir
-	}
+	expandedDestination := resolveDestinationForJob(job)
+	dirpath := filepath.Join(expandedDestination, timestamp)
 
-	dirname := fmt.Sprintf("%s_%s", strings.ReplaceAll(job.Name, " ", "_"), timestamp)
-	dirpath := filepath.Join(expandedDestination, dirname)
-
-	err := backupMongoDB(connectionString, expandedDestination, timestamp, job.Name)
+	err := backupMongoDB(connectionString, expandedDestination, timestamp)
 	if err != nil {
 		return "", err
 	}
@@ -707,19 +886,18 @@ func backupMongoDBWithMetadata(job BackupJob, connectionString, timestamp string
 
 	metadata := BackupMetadata{
 		JobID: job.ID, JobName: job.Name, BackupType: job.Type, Source: job.Source,
-		BackupFile: dirname, Timestamp: startTime,
+		BackupFile: filepath.Join(storageKeyForJob(job), timestamp), Timestamp: startTime,
 		HumanTime: startTime.Format("January 2, 2006 at 3:04 PM"),
-		FileSize: fileSize, FileSizeStr: formatFileSize(fileSize),
+		FileSize:  fileSize, FileSizeStr: formatFileSize(fileSize),
 		Duration: duration.String(), Status: "completed",
 	}
 	saveBackupMetadata(metadata, filepath.Join(dirpath, "metadata.json"))
 	return dirpath, nil
 }
 
-func backupMongoDB(connectionString, destination, timestamp, jobName string) error {
-	dirname := fmt.Sprintf("%s_%s", strings.ReplaceAll(jobName, " ", "_"), timestamp)
-	dirpath := filepath.Join(destination, dirname)
-	os.MkdirAll(destination, 0755)
+func backupMongoDB(connectionString, destination, timestamp string) error {
+	dirpath := filepath.Join(destination, timestamp)
+	os.MkdirAll(dirpath, 0755)
 
 	cmd := exec.Command("mongodump", "--uri", connectionString, "--out", dirpath)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: 0}
@@ -731,18 +909,9 @@ func backupMongoDB(connectionString, destination, timestamp, jobName string) err
 }
 
 func backupFileWithMetadata(job BackupJob, timestamp string, startTime time.Time) (string, error) {
-	backupBaseDir := getBackupBaseDir()
-	backupDir := filepath.Join(backupBaseDir, "backup-xd", "files")
-	var expandedDestination string
-	if strings.HasPrefix(job.Destination, backupBaseDir) {
-		expandedDestination = job.Destination
-	} else {
-		expandedDestination = backupDir
-	}
-
+	expandedDestination := resolveDestinationForJob(job)
 	expandedSource := expandPath(job.Source)
-	folderName := fmt.Sprintf("%s_%s", strings.ReplaceAll(job.Name, " ", "_"), timestamp)
-	folderPath := filepath.Join(expandedDestination, folderName)
+	folderPath := filepath.Join(expandedDestination, timestamp)
 	os.MkdirAll(folderPath, 0755)
 
 	err := backupFile(expandedSource, folderPath, timestamp)
@@ -756,9 +925,9 @@ func backupFileWithMetadata(job BackupJob, timestamp string, startTime time.Time
 
 	metadata := BackupMetadata{
 		JobID: job.ID, JobName: job.Name, BackupType: job.Type, Source: job.Source,
-		BackupFile: folderName, Timestamp: startTime,
+		BackupFile: filepath.Join(storageKeyForJob(job), timestamp), Timestamp: startTime,
 		HumanTime: startTime.Format("January 2, 2006 at 3:04 PM"),
-		FileSize: fileSize, FileSizeStr: formatFileSize(fileSize),
+		FileSize:  fileSize, FileSizeStr: formatFileSize(fileSize),
 		Duration: duration.String(), Status: "completed",
 	}
 	saveBackupMetadata(metadata, filepath.Join(folderPath, "metadata.json"))
@@ -775,18 +944,9 @@ func backupFile(source, destination, timestamp string) error {
 }
 
 func backupDirectoryWithMetadata(job BackupJob, timestamp string, startTime time.Time) (string, error) {
-	backupBaseDir := getBackupBaseDir()
-	backupDir := filepath.Join(backupBaseDir, "backup-xd", "directories")
-	var expandedDestination string
-	if strings.HasPrefix(job.Destination, backupBaseDir) {
-		expandedDestination = job.Destination
-	} else {
-		expandedDestination = backupDir
-	}
-
+	expandedDestination := resolveDestinationForJob(job)
 	expandedSource := expandPath(job.Source)
-	folderName := fmt.Sprintf("%s_%s", strings.ReplaceAll(job.Name, " ", "_"), timestamp)
-	folderPath := filepath.Join(expandedDestination, folderName)
+	folderPath := filepath.Join(expandedDestination, timestamp)
 	os.MkdirAll(folderPath, 0755)
 
 	err := backupDirectory(expandedSource, folderPath, timestamp)
@@ -800,9 +960,9 @@ func backupDirectoryWithMetadata(job BackupJob, timestamp string, startTime time
 
 	metadata := BackupMetadata{
 		JobID: job.ID, JobName: job.Name, BackupType: job.Type, Source: job.Source,
-		BackupFile: folderName, Timestamp: startTime,
+		BackupFile: filepath.Join(storageKeyForJob(job), timestamp), Timestamp: startTime,
 		HumanTime: startTime.Format("January 2, 2006 at 3:04 PM"),
-		FileSize: fileSize, FileSizeStr: formatFileSize(fileSize),
+		FileSize:  fileSize, FileSizeStr: formatFileSize(fileSize),
 		Duration: duration.String(), Status: "completed",
 	}
 	saveBackupMetadata(metadata, filepath.Join(folderPath, "metadata.json"))
@@ -826,10 +986,18 @@ func restorePostgres(dbName, backupFile string) error {
 	pgUser := os.Getenv("PGUSER")
 	pgPassword := os.Getenv("PGPASSWORD")
 	pgPort := os.Getenv("PGPORT")
-	if pgHost == "" { pgHost = "localhost" }
-	if pgUser == "" { pgUser = "postgres" }
-	if pgPassword == "" { pgPassword = "postgres" }
-	if pgPort == "" { pgPort = "5432" }
+	if pgHost == "" {
+		pgHost = "localhost"
+	}
+	if pgUser == "" {
+		pgUser = "postgres"
+	}
+	if pgPassword == "" {
+		pgPassword = "postgres"
+	}
+	if pgPort == "" {
+		pgPort = "5432"
+	}
 
 	cmd := exec.Command("psql", "-h", pgHost, "-U", pgUser, "-p", pgPort, "-d", dbName, "-f", backupFile)
 	cmd.Env = append(os.Environ(), "PGPASSWORD="+pgPassword)

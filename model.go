@@ -49,7 +49,6 @@ type screen int
 const (
 	screenMain screen = iota
 	screenBackupManagement
-	screenSettings
 	screenGlobalBackups
 	screenBackupView
 	screenBackupClean
@@ -61,8 +60,8 @@ type model struct {
 	config     BackupConfig
 	configFile string
 
-	screen screen
-	cursor int
+	screen  screen
+	cursor  int
 	message string
 
 	editMode  bool
@@ -74,17 +73,17 @@ type model struct {
 	deleteTargetIdx  int
 	deleteTargetName string
 
-	globalBackups     []BackupMetadata
-	selectedBackup    *BackupMetadata
+	globalBackups  []BackupMetadata
+	selectedBackup *BackupMetadata
 
 	globalDeleteMode       bool
 	globalDeleteTargetIdx  int
 	globalDeleteTargetName string
 
-	cleanupMode       bool
-	cleanupDays       int
-	cleanupConfirm    bool
-	cleanupPreview    []BackupMetadata
+	cleanupMode    bool
+	cleanupDays    int
+	cleanupConfirm bool
+	cleanupPreview []BackupMetadata
 
 	width        int
 	height       int
@@ -102,9 +101,10 @@ type statusMsg struct {
 
 type tickMsg time.Time
 type backupCompleteMsg struct {
-	jobID   int
-	success bool
-	message string
+	jobID       int
+	success     bool
+	message     string
+	completedAt time.Time
 }
 
 func showStatus(msg string) tea.Cmd {

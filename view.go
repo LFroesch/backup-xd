@@ -66,7 +66,6 @@ func (m model) renderMain() string {
 		"Backup Management",
 		"View All Backups (Global)",
 		"Cleanup Old Backups",
-		"Settings",
 		"Quit",
 	}
 

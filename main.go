@@ -21,6 +21,11 @@ func NewModel() model {
 
 	configFile := filepath.Join(homeDir, ".config", "backup-xd", "config.json")
 	config := loadBackupConfig(configFile)
+	var changed bool
+	config.Jobs, changed = normalizeJobsScheduleState(config.Jobs, time.Now())
+	if changed {
+		saveConfig(config, configFile)
+	}
 
 	m := model{
 		jobs:          config.Jobs,

@@ -32,11 +32,13 @@ Command:
 backup-xd
 ```
 
+There are no standalone subcommands yet. The current CLI is the interactive TUI launched by `backup-xd`.
+
 ## Features
 
 - **Database backups** — PostgreSQL (pg_dump), MySQL (mysqldump), MongoDB (mongodump)
 - **Filesystem backups** — Individual files and compressed directory archives
-- **Scheduling** — Recurring intervals (1h, 24h, 7d) or one-off
+- **In-app scheduling** — Due jobs run automatically while `backup-xd` is open
 - **Job management** — Create, edit, pause/resume, delete backup jobs
 - **Global backup view** — Browse all backups across types
 - **Cleanup** — Remove old backups based on retention
@@ -105,11 +107,11 @@ export MONGO_URI=mongodb://user:pass@localhost:27017/dbname
 
 ```
 ~/backups/backup-xd/
-├── postgres/
-├── mysql/
-├── mongodb/
-├── files/
-└── directories/
+├── postgres/<database>/<timestamp>/
+├── mysql/<database>/<timestamp>/
+├── mongodb/<job>/<timestamp>/
+├── files/<filename>/<timestamp>/
+└── directories/<directory>/<timestamp>/
 ```
 
 Each backup includes a `metadata.json` with timestamp, size, duration, and job details.
@@ -122,6 +124,8 @@ Each backup includes a `metadata.json` with timestamp, size, duration, and job d
 | `24h` | Daily |
 | `7d` | Weekly |
 | `oneoff` | Run once, then mark completed |
+
+Schedules are evaluated while the TUI is running. On each app tick, any active job whose `next_run` is due will start automatically. If the app is closed, missed runs are not executed until you open `backup-xd` again. Cron/systemd integration is still a backlog item if you want unattended scheduling while the app is not open.
 
 ## License
 

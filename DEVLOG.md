@@ -1,4 +1,10 @@
 ## DevLog
+### 2026-04-18: In-app scheduler enabled
+Added an open-app scheduler driven by the Bubble Tea tick loop. Active jobs with due `next_run` values now start automatically while `backup-xd` is running, `running` status prevents duplicate launches, and recurring jobs now advance `last_run`/`next_run` after completion.
+
+### 2026-04-18: Backup layout cleanup and docs correction
+Removed the dead Settings menu entry so the main menu only exposes implemented screens. Normalized backup storage to `~/backups/backup-xd/<type>/<job-key>/<timestamp>/...` and updated scan/delete/restore discovery to match. Corrected README to document that `backup-xd` is currently TUI-only and that schedule values are metadata, not an in-app automatic scheduler.
+
 ### 2026-03-23: Doc suite added
 Added CLAUDE.md, agent_spec.md. Updated README to scout standard. Documented all known issues.
 
