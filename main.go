@@ -1,6 +1,8 @@
 package main
 
 import (
+	"flag"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -10,6 +12,8 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 )
+
+var version = "dev"
 
 func NewModel() model {
 	loadEnvironmentFile()
@@ -69,6 +73,18 @@ func NewModel() model {
 }
 
 func main() {
+	showVersion := flag.Bool("version", false, "Print version and exit")
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "backup-xd — TUI backup manager for databases and filesystems\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: backup-xd [flags]\n\n")
+		flag.PrintDefaults()
+	}
+	flag.Parse()
+	if *showVersion {
+		fmt.Println("backup-xd " + version)
+		os.Exit(0)
+	}
+
 	m := NewModel()
 
 	p := tea.NewProgram(m, tea.WithAltScreen())
