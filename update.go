@@ -228,6 +228,25 @@ func (m model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.globalDeleteTargetName = ""
 			return m, nil
 		}
+		if m.screen == screenBackupManagement {
+			newJob := BackupJob{
+				ID:          m.config.NextID,
+				Name:        "New Backup Job",
+				Source:      "/path/to/source",
+				Destination: "",
+				Type:        "file",
+				Schedule:    "oneoff",
+				Status:      "active",
+				LastResult:  "Not run",
+				CreatedAt:   time.Now(),
+			}
+			m.config.NextID++
+			m.jobs = append(m.jobs, newJob)
+			m.config.Jobs = m.jobs
+			saveConfig(m.config, m.configFile)
+			m.updateTable()
+			return m, nil
+		}
 	case "+", "=":
 		if m.screen == screenBackupClean && !m.cleanupConfirm {
 			if m.cleanupDays < 365 {

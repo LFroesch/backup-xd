@@ -1,4 +1,7 @@
 ## DevLog
+### 2026-04-30: `n` keybind wired for adding jobs
+Footer/help advertised `n/a: add` but only `a` worked. Extended the existing `n` handler in update.go to also create a new backup job when on screenBackupManagement, matching the behavior of `a`. Files: update.go.
+
 ### 2026-04-18: In-app scheduler enabled
 Added an open-app scheduler driven by the Bubble Tea tick loop. Active jobs with due `next_run` values now start automatically while `backup-xd` is running, `running` status prevents duplicate launches, and recurring jobs now advance `last_run`/`next_run` after completion.
 
