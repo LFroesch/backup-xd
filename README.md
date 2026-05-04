@@ -42,7 +42,7 @@ There are no standalone subcommands yet. The current CLI is the interactive TUI 
 - **Job management** — Create, edit, pause/resume, delete backup jobs
 - **Global backup view** — Browse all backups across types
 - **Cleanup** — Remove old backups based on retention
-- **Restore** — Quick restore from latest backup
+- **Restore** — Confirmed restore from the latest backup, including MySQL
 - **Metadata tracking** — Timestamp, file size, duration saved with each backup
 
 ## Keybindings
@@ -63,7 +63,16 @@ There are no standalone subcommands yet. The current CLI is the interactive TUI 
 | `e` | Edit job |
 | `enter` | Run backup now |
 | `p` | Pause/resume job |
-| `d` | Delete job |
+| `del` | Delete job |
+| `ctrl+r` | Confirm and restore latest backup for selected job |
+| `esc` | Back to menu |
+
+### Global Backups
+
+| Key | Action |
+|-----|--------|
+| `v` | View backup details |
+| `d` | Delete selected backup |
 | `esc` | Back to menu |
 
 ## Backup Types
@@ -123,7 +132,7 @@ Each backup includes a `metadata.json` with timestamp, size, duration, and job d
 | `1h` | Every hour |
 | `24h` | Daily |
 | `7d` | Weekly |
-| `oneoff` | Run once, then mark completed |
+| `oneoff` | Manual-only job; never auto-scheduled |
 
 Schedules are evaluated while the TUI is running. On each app tick, any active job whose `next_run` is due will start automatically. If the app is closed, missed runs are not executed until you open `backup-xd` again. Cron/systemd integration is still a backlog item if you want unattended scheduling while the app is not open.
 

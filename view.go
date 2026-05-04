@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -19,6 +20,8 @@ func (m model) View() string {
 		return m.renderBackupManagement()
 	case screenGlobalBackups:
 		return m.renderGlobalBackups()
+	case screenBackupView:
+		return m.renderBackupView()
 	case screenBackupClean:
 		return m.renderBackupClean()
 	default:
@@ -153,6 +156,9 @@ func (m model) renderBackupManagement() string {
 		footer = warnTextStyle.Render(fmt.Sprintf("Editing %s%s: ", colName, scheduleHelp)) +
 			m.textInput.View() +
 			"\n" + dimTextStyle.Render("tab: next field  enter: save  esc: cancel")
+	} else if m.restoreConfirm {
+		footer = warnTextStyle.Render(fmt.Sprintf("Restore latest backup for '%s'? ", m.restoreTargetName)) +
+			dimTextStyle.Render("y: yes  n/esc: no")
 	} else {
 		var parts []string
 		add := func(key, action string) {
@@ -234,6 +240,43 @@ func (m model) renderGlobalBackups() string {
 	}
 
 	return fmt.Sprintf("%s\n\n%s\n\n%s%s", header, strings.Join(rows, "\n"), footer, messageStr)
+}
+
+func (m model) renderBackupView() string {
+	if m.selectedBackup == nil {
+		return titleStyle.Render("Backup Details") + "\n\n" +
+			errorTextStyle.Render("No backup selected.") + "\n\n" +
+			keyStyle.Render("esc") + " " + actionStyle.Render("back")
+	}
+
+	backup := m.selectedBackup
+	backupPath := filepath.Join(getBackupBaseDir(), "backup-xd", backupTypeDir(backup.BackupType), backup.BackupFile)
+
+	lines := []string{
+		titleStyle.Render("Backup Details"),
+		"",
+		fmt.Sprintf("%s %s", keyStyle.Render("Job"), backup.JobName),
+		fmt.Sprintf("%s %d", keyStyle.Render("Job ID"), backup.JobID),
+		fmt.Sprintf("%s %s", keyStyle.Render("Type"), backup.BackupType),
+		fmt.Sprintf("%s %s", keyStyle.Render("Status"), backup.Status),
+		fmt.Sprintf("%s %s", keyStyle.Render("Source"), backup.Source),
+		fmt.Sprintf("%s %s", keyStyle.Render("Created"), backup.Timestamp.Format("2006-01-02 15:04:05")),
+		fmt.Sprintf("%s %s ago", keyStyle.Render("Age"), formatAge(backup.Timestamp)),
+		fmt.Sprintf("%s %s", keyStyle.Render("Size"), backup.FileSizeStr),
+		fmt.Sprintf("%s %s", keyStyle.Render("Duration"), backup.Duration),
+		fmt.Sprintf("%s %s", keyStyle.Render("Storage"), backup.BackupFile),
+		fmt.Sprintf("%s %s", keyStyle.Render("Path"), backupPath),
+	}
+
+	if backup.Error != "" {
+		lines = append(lines, fmt.Sprintf("%s %s", errorTextStyle.Render("Error"), backup.Error))
+	}
+
+	footer := keyStyle.Render("esc") + " " + actionStyle.Render("back") +
+		bulletStyle.Render(" · ") +
+		keyStyle.Render("q") + " " + actionStyle.Render("back")
+
+	return strings.Join(append(lines, "", footer), "\n")
 }
 
 func (m model) renderBackupClean() string {

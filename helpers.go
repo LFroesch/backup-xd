@@ -243,7 +243,11 @@ func normalizeJobsScheduleState(jobs []BackupJob, now time.Time) ([]BackupJob, b
 	for i := range jobs {
 		schedule := strings.ToLower(strings.TrimSpace(jobs[i].Schedule))
 		if schedule == "oneoff" {
-			if jobs[i].Status != "completed" && !jobs[i].NextRun.IsZero() {
+			if jobs[i].Status == "completed" {
+				jobs[i].Status = "active"
+				changed = true
+			}
+			if !jobs[i].NextRun.IsZero() {
 				jobs[i].NextRun = time.Time{}
 				changed = true
 			}
@@ -289,9 +293,6 @@ func (m model) canStartJob(idx int) (bool, string) {
 	job := m.jobs[idx]
 	if job.Status == "paused" || job.Status == "running" {
 		return false, fmt.Sprintf("Job is %s", job.Status)
-	}
-	if job.Status == "completed" && strings.ToLower(job.Schedule) == "oneoff" {
-		return false, "One-off job already completed"
 	}
 	return true, ""
 }
@@ -633,7 +634,7 @@ func (m model) runBackup(jobID int) tea.Cmd {
 	}
 }
 
-func (m model) showRestoreOptions(job BackupJob) tea.Cmd {
+func (m model) restoreLatestBackup(job BackupJob) tea.Cmd {
 	return func() tea.Msg {
 		backupFiles, err := findBackupsForJob(job)
 		if err != nil {
@@ -658,6 +659,8 @@ func (m model) showRestoreOptions(job BackupJob) tea.Cmd {
 		switch job.Type {
 		case "postgres":
 			err2 = restorePostgres(job.Source, latestBackup)
+		case "mysql":
+			err2 = restoreMySQL(job.Source, latestBackup)
 		case "mongodb":
 			err2 = restoreMongoDB(connectionString, latestBackup)
 		case "file":
@@ -1003,6 +1006,43 @@ func restorePostgres(dbName, backupFile string) error {
 	cmd.Env = append(os.Environ(), "PGPASSWORD="+pgPassword)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: 0}
 	return cmd.Run()
+}
+
+func restoreMySQL(dbName, backupFile string) error {
+	mysqlHost := os.Getenv("MYSQL_HOST")
+	mysqlUser := os.Getenv("MYSQL_USER")
+	mysqlPassword := os.Getenv("MYSQL_PASSWORD")
+	mysqlPort := os.Getenv("MYSQL_PORT")
+	if mysqlHost == "" {
+		mysqlHost = "localhost"
+	}
+	if mysqlUser == "" {
+		mysqlUser = "root"
+	}
+	if mysqlPort == "" {
+		mysqlPort = "3306"
+	}
+
+	file, err := os.Open(backupFile)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	args := []string{"-h", mysqlHost, "-u", mysqlUser, "-P", mysqlPort}
+	if mysqlPassword != "" {
+		args = append(args, fmt.Sprintf("-p%s", mysqlPassword))
+	}
+	args = append(args, dbName)
+
+	cmd := exec.Command("mysql", args...)
+	cmd.Stdin = file
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: 0}
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("mysql restore failed: %v\nOutput: %s", err, string(output))
+	}
+	return nil
 }
 
 func restoreMongoDB(connectionString, backupDir string) error {

@@ -32,7 +32,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if job.ID == msg.jobID {
 				m.jobs[i].LastRun = msg.completedAt
 				if strings.ToLower(job.Schedule) == "oneoff" {
-					m.jobs[i].Status = "completed"
+					m.jobs[i].Status = "active"
 					m.jobs[i].NextRun = time.Time{}
 				} else {
 					m.jobs[i].Status = "active"
@@ -136,11 +136,23 @@ func (m model) updateEdit(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.screen == screenBackupManagement && m.restoreConfirm {
+		switch msg.String() {
+		case "y", "n", "esc":
+		default:
+			return m, nil
+		}
+	}
+
 	switch msg.String() {
 	case "?":
 		m.showHelp = true
 		return m, nil
 	case "q":
+		if m.screen == screenBackupView {
+			m.screen = screenGlobalBackups
+			return m, nil
+		}
 		if m.screen != screenMain {
 			m.screen = screenMain
 			m.cursor = 0
@@ -148,7 +160,7 @@ func (m model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Quit
 	case "up", "k":
-		if m.globalDeleteMode {
+		if m.globalDeleteMode || m.restoreConfirm {
 			return m, nil
 		}
 		if m.screen == screenBackupManagement {
@@ -161,7 +173,7 @@ func (m model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "down", "j":
-		if m.globalDeleteMode {
+		if m.globalDeleteMode || m.restoreConfirm {
 			return m, nil
 		}
 		if m.screen == screenBackupManagement {
@@ -176,6 +188,9 @@ func (m model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "enter":
 		if m.screen == screenBackupManagement {
+			if m.restoreConfirm {
+				return m, nil
+			}
 			if len(m.jobs) > 0 {
 				return m.startJobRun(m.table.Cursor(), "Manual run started")
 			}
@@ -183,10 +198,20 @@ func (m model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m.handleEnter()
 	case "esc":
+		if m.restoreConfirm {
+			m.restoreConfirm = false
+			m.restoreTargetIdx = -1
+			m.restoreTargetName = ""
+			return m, nil
+		}
 		if m.globalDeleteMode {
 			m.globalDeleteMode = false
 			m.globalDeleteTargetIdx = -1
 			m.globalDeleteTargetName = ""
+			return m, nil
+		}
+		if m.screen == screenBackupView {
+			m.screen = screenGlobalBackups
 			return m, nil
 		}
 		if m.screen != screenMain {
@@ -211,6 +236,9 @@ func (m model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	case "y":
+		if m.screen == screenBackupManagement && m.restoreConfirm {
+			return m.performRestore()
+		}
 		if m.screen == screenBackupClean && m.cleanupConfirm {
 			return m.performCleanup()
 		}
@@ -218,6 +246,12 @@ func (m model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.performGlobalBackupDelete()
 		}
 	case "n":
+		if m.screen == screenBackupManagement && m.restoreConfirm {
+			m.restoreConfirm = false
+			m.restoreTargetIdx = -1
+			m.restoreTargetName = ""
+			return m, nil
+		}
 		if m.screen == screenBackupClean && m.cleanupConfirm {
 			m.cleanupConfirm = false
 			return m, nil
@@ -304,9 +338,12 @@ func (m model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "ctrl+r":
-		if m.screen == screenBackupManagement && len(m.jobs) > 0 {
-			job := m.jobs[m.table.Cursor()]
-			return m, m.showRestoreOptions(job)
+		if m.screen == screenBackupManagement && len(m.jobs) > 0 && !m.restoreConfirm {
+			idx := m.table.Cursor()
+			m.restoreConfirm = true
+			m.restoreTargetIdx = idx
+			m.restoreTargetName = m.jobs[idx].Name
+			return m, nil
 		}
 		return m, nil
 	case "r":
@@ -320,10 +357,6 @@ func (m model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.screen == screenBackupManagement && len(m.jobs) > 0 {
 			idx := m.table.Cursor()
 			currentStatus := m.jobs[idx].Status
-
-			if currentStatus == "completed" && strings.ToLower(m.jobs[idx].Schedule) == "oneoff" {
-				return m, showStatus("Cannot resume completed OneOff job")
-			}
 
 			if currentStatus == "running" {
 				return m, showStatus("Cannot pause a running job")
@@ -354,6 +387,21 @@ func (m model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func (m model) performRestore() (tea.Model, tea.Cmd) {
+	if m.restoreTargetIdx < 0 || m.restoreTargetIdx >= len(m.jobs) {
+		m.restoreConfirm = false
+		m.restoreTargetIdx = -1
+		m.restoreTargetName = ""
+		return m, showStatus("Job not found")
+	}
+
+	job := m.jobs[m.restoreTargetIdx]
+	m.restoreConfirm = false
+	m.restoreTargetIdx = -1
+	m.restoreTargetName = ""
+	return m, m.restoreLatestBackup(job)
 }
 
 func (m model) handleEnter() (model, tea.Cmd) {
@@ -395,7 +443,6 @@ func (m model) handleViewBackupDetails() (model, tea.Cmd) {
 		backup := m.globalBackups[m.cursor]
 		m.selectedBackup = &backup
 		m.screen = screenBackupView
-		m.cursor = 0
 	}
 	return m, nil
 }

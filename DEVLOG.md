@@ -1,4 +1,13 @@
 ## DevLog
+### 2026-05-04: One-off jobs made reusable and restore now confirms
+Changed `oneoff` semantics from "run once ever" to "manual-only, runnable multiple times" by keeping one-off jobs active after completion and normalizing legacy completed one-offs back to active on load. Added a `ctrl+r` confirmation prompt before restore execution so latest-backup restores are no longer immediate. Updated README behavior docs and noted an older-backup restore picker as backlog in WORK.md. Files: model.go, helpers.go, update.go, view.go, README.md, WORK.md.
+
+### 2026-05-04: V1 blocker pass completed
+Implemented the global backup detail screen so the existing `v` keypath now renders real metadata instead of a placeholder, and added MySQL restore support so `ctrl+r` works across the advertised database backup types. Updated README keybindings/feature notes and cleared the stale v1 blocker list from WORK.md. Files: view.go, update.go, helpers.go, README.md, WORK.md.
+
+### 2026-05-04: WORK audit refreshed against codebase
+Checked the current v1 task list against the live code. `WORK.md` had gone stale: the remaining confirmed blockers are the unimplemented global backup detail screen (`screenBackupView` routes to a placeholder) and missing MySQL restore handling in the restore flow. Also noted that `go test ./...` still passes. Files: WORK.md.
+
 ### 2026-04-30: `n` keybind wired for adding jobs
 Footer/help advertised `n/a: add` but only `a` worked. Extended the existing `n` handler in update.go to also create a new backup job when on screenBackupManagement, matching the behavior of `a`. Files: update.go.
 

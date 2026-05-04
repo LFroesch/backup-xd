@@ -73,6 +73,10 @@ type model struct {
 	deleteTargetIdx  int
 	deleteTargetName string
 
+	restoreConfirm    bool
+	restoreTargetIdx  int
+	restoreTargetName string
+
 	globalBackups  []BackupMetadata
 	selectedBackup *BackupMetadata
 
