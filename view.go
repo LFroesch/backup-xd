@@ -30,34 +30,38 @@ func (m model) View() string {
 }
 
 func (m model) renderHelp() string {
+	helpWidth := max(28, m.width-4)
 	helpStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(colorPrimary).
 		Padding(1, 2).
-		Width(m.width - 4)
-
-	keys := []struct{ key, desc string }{
-		{"j/k, ↑/↓", "Navigate"},
-		{"enter", "Select / run backup"},
-		{"e", "Edit selected job"},
-		{"a", "Add new job"},
-		{"delete", "Delete selected job"},
-		{"esc/q", "Back / quit"},
-		{"?", "Toggle this help"},
-		{"ctrl+c", "Quit immediately"},
-	}
+		Width(helpWidth)
 
 	var lines []string
 	lines = append(lines, titleStyle.Render("backup-xd — Help"))
 	lines = append(lines, "")
-	for _, k := range keys {
-		lines = append(lines, fmt.Sprintf("  %s  %s",
-			keyStyle.Render(fmt.Sprintf("%-16s", k.key)),
-			k.desc,
-		))
-	}
+	lines = append(lines, dimTextStyle.Render("Main"))
+	lines = append(lines, fmt.Sprintf("  %s  %s", keyStyle.Render(fmt.Sprintf("%-16s", "j/k, ↑/↓")), "Navigate"))
+	lines = append(lines, fmt.Sprintf("  %s  %s", keyStyle.Render(fmt.Sprintf("%-16s", "enter")), "Select menu item"))
+	lines = append(lines, fmt.Sprintf("  %s  %s", keyStyle.Render(fmt.Sprintf("%-16s", "?")), "Open help"))
+	lines = append(lines, fmt.Sprintf("  %s  %s", keyStyle.Render(fmt.Sprintf("%-16s", "q / esc")), "Back or quit"))
 	lines = append(lines, "")
-	lines = append(lines, dimTextStyle.Render("Press ?, q, or esc to close"))
+	lines = append(lines, dimTextStyle.Render("Backup Management"))
+	lines = append(lines, fmt.Sprintf("  %s  %s", keyStyle.Render(fmt.Sprintf("%-16s", "a / n")), "Add new job"))
+	lines = append(lines, fmt.Sprintf("  %s  %s", keyStyle.Render(fmt.Sprintf("%-16s", "e")), "Edit selected job"))
+	lines = append(lines, fmt.Sprintf("  %s  %s", keyStyle.Render(fmt.Sprintf("%-16s", "enter / space")), "Run selected job now"))
+	lines = append(lines, fmt.Sprintf("  %s  %s", keyStyle.Render(fmt.Sprintf("%-16s", "p")), "Pause or resume selected job"))
+	lines = append(lines, fmt.Sprintf("  %s  %s", keyStyle.Render(fmt.Sprintf("%-16s", "r")), "Reload jobs"))
+	lines = append(lines, fmt.Sprintf("  %s  %s", keyStyle.Render(fmt.Sprintf("%-16s", "delete")), "Delete selected job"))
+	lines = append(lines, fmt.Sprintf("  %s  %s", keyStyle.Render(fmt.Sprintf("%-16s", "ctrl+r")), "Restore latest backup (confirm first)"))
+	lines = append(lines, "")
+	lines = append(lines, dimTextStyle.Render("Global / Cleanup"))
+	lines = append(lines, fmt.Sprintf("  %s  %s", keyStyle.Render(fmt.Sprintf("%-16s", "v / d")), "View or delete a backup"))
+	lines = append(lines, fmt.Sprintf("  %s  %s", keyStyle.Render(fmt.Sprintf("%-16s", "c")), "Open cleanup confirmation"))
+	lines = append(lines, fmt.Sprintf("  %s  %s", keyStyle.Render(fmt.Sprintf("%-16s", "+ / -")), "Adjust cleanup retention days"))
+	lines = append(lines, fmt.Sprintf("  %s  %s", keyStyle.Render(fmt.Sprintf("%-16s", "y / n")), "Confirm or cancel destructive actions"))
+	lines = append(lines, "")
+	lines = append(lines, dimTextStyle.Render("Press ?, q, or esc to close."))
 
 	return lipgloss.Place(m.width, m.height,
 		lipgloss.Center, lipgloss.Center,

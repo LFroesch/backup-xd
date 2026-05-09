@@ -1,140 +1,96 @@
-# Backup-xd
+# backup-xd
 
-TUI backup manager for databases and filesystems. Create, schedule, and manage backups with an interactive terminal interface. Built with Go and [Bubble Tea](https://github.com/charmbracelet/bubbletea).
+Terminal backup manager for local databases and filesystem targets. `backup-xd` lets you define jobs, run them on demand, review backup history, clean up old archives, and restore the latest backup from one TUI.
 
-## Quick Install
+## Install
 
 Supported platforms: Linux and macOS. On Windows, use WSL.
 
-Recommended (installs to `~/.local/bin`):
+Recommended:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/LFroesch/backup-xd/main/install.sh | bash
 ```
 
-Or download a binary from [GitHub Releases](https://github.com/LFroesch/backup-xd/releases).
-
-Or install with Go:
+Other options:
 
 ```bash
 go install github.com/LFroesch/backup-xd@latest
-```
-
-Or build from source:
-
-```bash
 make install
 ```
 
-Command:
+Then run:
 
 ```bash
 backup-xd
+backup-xd --version
 ```
 
-There are no standalone subcommands yet. The current CLI is the interactive TUI launched by `backup-xd`.
+## What It Covers
 
-## Features
+- PostgreSQL backups via `pg_dump`
+- MySQL backups via `mysqldump`
+- MongoDB backups via `mongodump`
+- File copies
+- Directory archives via `tar`
 
-- **Database backups** — PostgreSQL (pg_dump), MySQL (mysqldump), MongoDB (mongodump)
-- **Filesystem backups** — Individual files and compressed directory archives
-- **In-app scheduling** — Due jobs run automatically while `backup-xd` is open
-- **Job management** — Create, edit, pause/resume, delete backup jobs
-- **Global backup view** — Browse all backups across types
-- **Cleanup** — Remove old backups based on retention
-- **Restore** — Confirmed restore from the latest backup, including MySQL
-- **Metadata tracking** — Timestamp, file size, duration saved with each backup
+## How It Works
 
-## Keybindings
+- Jobs are stored in `~/.config/backup-xd/config.json`
+- Database credentials are read from `~/.config/backup-xd/.backup-env`
+- Backups are written under `~/backups/backup-xd/`
+- Each backup includes `metadata.json` with timestamp, size, duration, and job details
 
-### Main Menu
-
-| Key | Action |
-|-----|--------|
-| `j/k`, `up/down` | Navigate |
-| `enter` | Select menu item |
-| `q` | Quit |
-
-### Backup Management
-
-| Key | Action |
-|-----|--------|
-| `a` | Add new backup job |
-| `e` | Edit job |
-| `enter` | Run backup now |
-| `p` | Pause/resume job |
-| `del` | Delete job |
-| `ctrl+r` | Confirm and restore latest backup for selected job |
-| `esc` | Back to menu |
-
-### Global Backups
-
-| Key | Action |
-|-----|--------|
-| `v` | View backup details |
-| `d` | Delete selected backup |
-| `esc` | Back to menu |
-
-## Backup Types
-
-| Type | Tool | Source |
-|------|------|--------|
-| `postgres` | `pg_dump` | Database name |
-| `mysql` | `mysqldump` | Database name |
-| `mongodb` | `mongodump` | Connection URI |
-| `file` | `cp` | File path |
-| `directory` | `tar` | Directory path |
-
-## Configuration
-
-### Config File
-
-`~/.config/backup-xd/config.json` — backup job definitions
-
-### Environment Variables
-
-Database connections read from `~/.config/backup-xd/.backup-env`:
+Example env file:
 
 ```bash
-# PostgreSQL
 export PGHOST=localhost
 export PGUSER=postgres
 export PGPASSWORD=your_password
 export PGPORT=5432
 
-# MySQL
 export MYSQL_HOST=localhost
 export MYSQL_USER=root
 export MYSQL_PASSWORD=your_password
 export MYSQL_PORT=3306
 
-# MongoDB
 export MONGO_URI=mongodb://user:pass@localhost:27017/dbname
 ```
 
-### Backup Storage
+## Features
 
-```
-~/backups/backup-xd/
-├── postgres/<database>/<timestamp>/
-├── mysql/<database>/<timestamp>/
-├── mongodb/<job>/<timestamp>/
-├── files/<filename>/<timestamp>/
-└── directories/<directory>/<timestamp>/
-```
+- Create, edit, pause, resume, and delete backup jobs
+- Run jobs manually or let scheduled jobs fire while the app is open
+- Browse all backups across job types from one view
+- Restore the latest backup with confirmation
+- Clean up old backups by retention window
 
-Each backup includes a `metadata.json` with timestamp, size, duration, and job details.
+Supported schedule values:
 
-## Schedule Options
+| Value | Meaning |
+|-------|---------|
+| `1h` | every hour |
+| `24h` | every day |
+| `7d` | every week |
+| `oneoff` | manual only |
 
-| Schedule | Behavior |
-|----------|----------|
-| `1h` | Every hour |
-| `24h` | Daily |
-| `7d` | Weekly |
-| `oneoff` | Manual-only job; never auto-scheduled |
+Scheduling is in-app only for now. If `backup-xd` is closed, missed jobs do not run until you open it again.
 
-Schedules are evaluated while the TUI is running. On each app tick, any active job whose `next_run` is due will start automatically. If the app is closed, missed runs are not executed until you open `backup-xd` again. Cron/systemd integration is still a backlog item if you want unattended scheduling while the app is not open.
+## Controls
+
+| Key | Action |
+|-----|--------|
+| `j/k`, `up/down` | Move |
+| `enter` | Select |
+| `a` | Add job |
+| `e` | Edit selected job |
+| `space` | Run selected job now |
+| `p` | Pause or resume job |
+| `ctrl+r` | Restore latest backup for selected job |
+| `d`, `del` | Delete selected backup or job where supported |
+| `?` | Help |
+| `esc` | Back |
+| `q` | Quit |
 
 ## License
 
