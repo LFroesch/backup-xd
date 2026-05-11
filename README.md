@@ -1,6 +1,6 @@
 # backup-xd
 
-Terminal backup manager for local databases and filesystem targets. `backup-xd` lets you define jobs, run them on demand, review backup history, clean up old archives, and restore the latest backup from one TUI.
+Terminal backup manager for local databases and filesystem targets. `backup-xd` is for the recurring backup and restore work that usually ends up split across shell scripts, cron notes, and one-off commands.
 
 ## Install
 
@@ -26,6 +26,10 @@ backup-xd
 backup-xd --version
 ```
 
+## Media
+
+Planned README capture: one screenshot showing the jobs list plus recent backup history, and one short restore-flow clip once the v1 polish pass is done.
+
 ## What It Covers
 
 - PostgreSQL backups via `pg_dump`
@@ -40,6 +44,15 @@ backup-xd --version
 - Database credentials are read from `~/.config/backup-xd/.backup-env`
 - Backups are written under `~/backups/backup-xd/`
 - Each backup includes `metadata.json` with timestamp, size, duration, and job details
+
+## Requirements
+
+- PostgreSQL jobs need `pg_dump`
+- MySQL jobs need `mysqldump`
+- MongoDB jobs need `mongodump`
+- Directory archive jobs rely on `tar`
+
+If a required tool is missing, the job fails explicitly instead of silently skipping work.
 
 Example env file:
 
