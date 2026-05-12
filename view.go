@@ -9,6 +9,10 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+func appTitle() string {
+	return titleStyle.Render("backup-xd") + " " + dimTextStyle.Render(version)
+}
+
 func (m model) View() string {
 	if m.showHelp {
 		return m.renderHelp()
@@ -38,7 +42,7 @@ func (m model) renderHelp() string {
 		Width(helpWidth)
 
 	var lines []string
-	lines = append(lines, titleStyle.Render("backup-xd — Help"))
+	lines = append(lines, appTitle()+dimTextStyle.Render(" — Help"))
 	lines = append(lines, "")
 	lines = append(lines, dimTextStyle.Render("Main"))
 	lines = append(lines, fmt.Sprintf("  %s  %s", keyStyle.Render(fmt.Sprintf("%-16s", "j/k, ↑/↓")), "Navigate"))
@@ -76,7 +80,7 @@ func (m model) renderMain() string {
 		"Quit",
 	}
 
-	header := titleStyle.Render("backup-xd")
+	header := appTitle()
 
 	var rows []string
 	for i, option := range options {
@@ -126,7 +130,7 @@ func (m model) renderBackupManagement() string {
 		}
 	}
 
-	title := titleStyle.Render("backup-xd")
+	title := appTitle()
 
 	statsBox := lipgloss.NewStyle().
 		Foreground(colorDim).
@@ -194,12 +198,12 @@ func (m model) renderBackupManagement() string {
 
 func (m model) renderGlobalBackups() string {
 	if len(m.globalBackups) == 0 {
-		return titleStyle.Render("Global Backups") + "\n\n" +
+		return appTitle() + dimTextStyle.Render(" — Global Backups") + "\n\n" +
 			dimTextStyle.Render("No backups found.") + "\n\n" +
 			keyStyle.Render("esc") + " " + actionStyle.Render("back")
 	}
 
-	header := titleStyle.Render(fmt.Sprintf("Global Backups (%d total)", len(m.globalBackups)))
+	header := appTitle() + dimTextStyle.Render(fmt.Sprintf("  ·  Global Backups (%d total)", len(m.globalBackups)))
 
 	var rows []string
 	for i, backup := range m.globalBackups {
@@ -248,7 +252,7 @@ func (m model) renderGlobalBackups() string {
 
 func (m model) renderBackupView() string {
 	if m.selectedBackup == nil {
-		return titleStyle.Render("Backup Details") + "\n\n" +
+		return appTitle() + dimTextStyle.Render(" — Backup Details") + "\n\n" +
 			errorTextStyle.Render("No backup selected.") + "\n\n" +
 			keyStyle.Render("esc") + " " + actionStyle.Render("back")
 	}
@@ -257,7 +261,7 @@ func (m model) renderBackupView() string {
 	backupPath := filepath.Join(getBackupBaseDir(), "backup-xd", backupTypeDir(backup.BackupType), backup.BackupFile)
 
 	lines := []string{
-		titleStyle.Render("Backup Details"),
+		appTitle() + dimTextStyle.Render(" — Backup Details"),
 		"",
 		fmt.Sprintf("%s %s", keyStyle.Render("Job"), backup.JobName),
 		fmt.Sprintf("%s %d", keyStyle.Render("Job ID"), backup.JobID),
@@ -284,7 +288,7 @@ func (m model) renderBackupView() string {
 }
 
 func (m model) renderBackupClean() string {
-	header := titleStyle.Render("Cleanup Old Backups")
+	header := appTitle() + dimTextStyle.Render("  ·  Cleanup Old Backups")
 
 	settingsText := fmt.Sprintf("Cleanup backups older than: %d days\n\n", m.cleanupDays)
 
