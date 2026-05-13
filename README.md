@@ -9,7 +9,6 @@ Terminal backup manager for local databases and filesystem targets. `backup-xd` 
 Supported platforms: Linux and macOS.
 
 Native Windows is not supported yet.
-On Windows, use WSL.
 
 Recommended:
 
@@ -23,18 +22,6 @@ Other options:
 go install github.com/LFroesch/backup-xd@latest
 make install
 ```
-
-Windows:
-
-```powershell
-./install.ps1
-```
-
-```bat
-install.cmd
-```
-
-Both Windows installer entrypoints exit with a clear unsupported message on native Windows.
 
 Then run:
 
@@ -68,8 +55,6 @@ Planned README capture: one screenshot showing the jobs list plus recent backup 
 - MySQL jobs need `mysqldump`
 - MongoDB jobs need `mongodump`
 - Directory archive jobs rely on `tar`
-
-Native Windows support is blocked by Unix-specific process handling in the current implementation.
 
 If a required tool is missing, the job fails explicitly instead of silently skipping work.
 
