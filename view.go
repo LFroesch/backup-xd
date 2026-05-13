@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LFroesch/tui-suite/suitechrome"
+	"github.com/LFroesch/backup-xd/suitechrome"
 	"github.com/charmbracelet/lipgloss"
 )
 
