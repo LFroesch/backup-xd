@@ -6,11 +6,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/LFroesch/tui-suite/suitechrome"
 	"github.com/charmbracelet/lipgloss"
 )
 
 func appTitle() string {
-	return titleStyle.Render("backup-xd") + " " + dimTextStyle.Render(version)
+	return suitechrome.RenderTitle("backup-xd", version)
 }
 
 func (m model) View() string {
@@ -91,29 +92,27 @@ func (m model) renderMain() string {
 		}
 	}
 
-	var status []string
-	status = append(status,
-		keyStyle.Render("enter"), " ", actionStyle.Render("select"),
-		bulletStyle.Render(" · "),
-		keyStyle.Render("j/k"), " ", actionStyle.Render("navigate"),
-		bulletStyle.Render(" · "),
-		keyStyle.Render("q"), " ", actionStyle.Render("quit"),
-	)
+	status := suitechrome.RenderActions([]suitechrome.Action{
+		{Key: "enter", Label: "select"},
+		{Key: "j/k", Label: "navigate"},
+		{Key: "q", Label: "quit"},
+	})
 
 	messageStr := ""
 	if m.message != "" {
 		messageStr = "\n" + statusMsgStyle.Render("> "+m.message)
 	}
 
-	return fmt.Sprintf("%s\n\n%s\n\n%s%s", header, strings.Join(rows, "\n"), strings.Join(status, ""), messageStr)
+	return fmt.Sprintf("%s\n\n%s\n\n%s%s", header, strings.Join(rows, "\n"), status, messageStr)
 }
 
 func (m model) renderBackupManagement() string {
 	if len(m.jobs) == 0 {
 		content := dimTextStyle.Render("No backup jobs configured yet. Press 'a' to add one.")
-		footer := keyStyle.Render("a") + " " + actionStyle.Render("add") +
-			bulletStyle.Render(" · ") +
-			keyStyle.Render("esc") + " " + actionStyle.Render("back")
+		footer := suitechrome.RenderActions([]suitechrome.Action{
+			{Key: "a", Label: "add"},
+			{Key: "esc", Label: "back"},
+		})
 		return lipgloss.JoinVertical(lipgloss.Left, content, "", footer)
 	}
 
@@ -168,12 +167,9 @@ func (m model) renderBackupManagement() string {
 		footer = warnTextStyle.Render(fmt.Sprintf("Restore latest backup for '%s'? ", m.restoreTargetName)) +
 			dimTextStyle.Render("y: yes  n/esc: no")
 	} else {
-		var parts []string
+		var actions []suitechrome.Action
 		add := func(key, action string) {
-			if len(parts) > 0 {
-				parts = append(parts, bulletStyle.Render(" · "))
-			}
-			parts = append(parts, keyStyle.Render(key), " ", actionStyle.Render(action))
+			actions = append(actions, suitechrome.Action{Key: key, Label: action})
 		}
 		add("enter", "backup")
 		add("ctrl+r", "restore")
@@ -183,7 +179,7 @@ func (m model) renderBackupManagement() string {
 		add("del", "delete")
 		add("r", "refresh")
 		add("esc", "back")
-		footer = strings.Join(parts, "")
+		footer = suitechrome.RenderActions(actions)
 	}
 
 	var viewParts []string
@@ -200,7 +196,7 @@ func (m model) renderGlobalBackups() string {
 	if len(m.globalBackups) == 0 {
 		return appTitle() + dimTextStyle.Render(" — Global Backups") + "\n\n" +
 			dimTextStyle.Render("No backups found.") + "\n\n" +
-			keyStyle.Render("esc") + " " + actionStyle.Render("back")
+			suitechrome.RenderActions([]suitechrome.Action{{Key: "esc", Label: "back"}})
 	}
 
 	header := appTitle() + dimTextStyle.Render(fmt.Sprintf("  ·  Global Backups (%d total)", len(m.globalBackups)))
@@ -229,17 +225,11 @@ func (m model) renderGlobalBackups() string {
 		footer = errorTextStyle.Render(fmt.Sprintf("Delete backup '%s'? ", m.globalDeleteTargetName)) +
 			dimTextStyle.Render("y: yes  n/esc: no")
 	} else {
-		var parts []string
-		add := func(key, action string) {
-			if len(parts) > 0 {
-				parts = append(parts, bulletStyle.Render(" · "))
-			}
-			parts = append(parts, keyStyle.Render(key), " ", actionStyle.Render(action))
-		}
-		add("v", "view")
-		add("d", "delete")
-		add("esc", "back")
-		footer = strings.Join(parts, "")
+		footer = suitechrome.RenderActions([]suitechrome.Action{
+			{Key: "v", Label: "view"},
+			{Key: "d", Label: "delete"},
+			{Key: "esc", Label: "back"},
+		})
 	}
 
 	messageStr := ""
@@ -254,7 +244,7 @@ func (m model) renderBackupView() string {
 	if m.selectedBackup == nil {
 		return appTitle() + dimTextStyle.Render(" — Backup Details") + "\n\n" +
 			errorTextStyle.Render("No backup selected.") + "\n\n" +
-			keyStyle.Render("esc") + " " + actionStyle.Render("back")
+			suitechrome.RenderActions([]suitechrome.Action{{Key: "esc", Label: "back"}})
 	}
 
 	backup := m.selectedBackup
@@ -280,9 +270,10 @@ func (m model) renderBackupView() string {
 		lines = append(lines, fmt.Sprintf("%s %s", errorTextStyle.Render("Error"), backup.Error))
 	}
 
-	footer := keyStyle.Render("esc") + " " + actionStyle.Render("back") +
-		bulletStyle.Render(" · ") +
-		keyStyle.Render("q") + " " + actionStyle.Render("back")
+	footer := suitechrome.RenderActions([]suitechrome.Action{
+		{Key: "esc", Label: "back"},
+		{Key: "q", Label: "back"},
+	})
 
 	return strings.Join(append(lines, "", footer), "\n")
 }
@@ -315,21 +306,16 @@ func (m model) renderBackupClean() string {
 
 	var footer string
 	if m.cleanupConfirm {
-		footer = keyStyle.Render("y") + " " + actionStyle.Render("confirm") +
-			bulletStyle.Render(" · ") +
-			keyStyle.Render("n/esc") + " " + actionStyle.Render("cancel")
+		footer = suitechrome.RenderActions([]suitechrome.Action{
+			{Key: "y", Label: "confirm"},
+			{Key: "n/esc", Label: "cancel"},
+		})
 	} else {
-		var parts []string
-		add := func(key, action string) {
-			if len(parts) > 0 {
-				parts = append(parts, bulletStyle.Render(" · "))
-			}
-			parts = append(parts, keyStyle.Render(key), " ", actionStyle.Render(action))
-		}
-		add("+/-", "adjust days")
-		add("c", "clean")
-		add("esc", "back")
-		footer = strings.Join(parts, "")
+		footer = suitechrome.RenderActions([]suitechrome.Action{
+			{Key: "+/-", Label: "adjust days"},
+			{Key: "c", Label: "clean"},
+			{Key: "esc", Label: "back"},
+		})
 	}
 
 	messageStr := ""
